@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://token-meter.app/schemas/TokenMeter/1.2.0/request.schema.json",
+  "title": "TokenMeter/1.2.0 bridge request",
+  "description": "One strict UTF-8 JSON object read from stdin. Maximum 64 KiB. deadlineAtMs must be later than requestedAtMs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "operation",
+    "providerId",
+    "connectorId",
+    "accountRef",
+    "requestedAtMs",
+    "deadlineAtMs"
+  ],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "requestId": { "$ref": "common.schema.json#/$defs/requestId" },
+    "operation": { "const": "fetchUsage" },
+    "providerId": { "$ref": "common.schema.json#/$defs/providerId" },
+    "connectorId": { "$ref": "common.schema.json#/$defs/connectorId" },
+    "accountRef": { "$ref": "common.schema.json#/$defs/accountRef" },
+    "requestedAtMs": { "$ref": "common.schema.json#/$defs/epochMs" },
+    "deadlineAtMs": { "$ref": "common.schema.json#/$defs/epochMs" },
+    "credential": { "$ref": "common.schema.json#/$defs/credential" }
+  }
+}

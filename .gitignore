@@ -1,0 +1,16 @@
+# Build artifacts
+.build/
+bridge/build/
+
+# Dependencies
+node_modules/
+
+# Local agent/session state
+.omo/
+.codex/
+.opencode/
+.senpi/
+.debug-journal.md
+
+# macOS
+.DS_Store

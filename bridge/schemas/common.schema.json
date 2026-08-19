@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://token-meter.app/schemas/TokenMeter/1.2.0/common.schema.json",
+  "title": "TokenMeter/1.2.0 common definitions",
+  "description": "Shared vocabulary for the TokenMeter bridge wire protocol. Every object is closed: unknown fields are rejected.",
+  "$defs": {
+    "schemaVersion": { "const": "1.2.0" },
+    "requestId": { "type": "string", "minLength": 1 },
+    "providerId": { "type": "string", "minLength": 1 },
+    "connectorId": { "type": "string", "minLength": 1 },
+    "accountRef": { "type": "string", "minLength": 1 },
+    "epochMs": { "type": "integer", "minimum": 1 },
+    "correlation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "providerId", "connectorId", "accountRef", "completedAtMs"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/schemaVersion" },
+        "requestId": { "$ref": "#/$defs/requestId" },
+        "providerId": { "$ref": "#/$defs/providerId" },
+        "connectorId": { "$ref": "#/$defs/connectorId" },
+        "accountRef": { "$ref": "#/$defs/accountRef" },
+        "completedAtMs": { "$ref": "#/$defs/epochMs" }
+      }
+    },
+    "credential": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "const": "none" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "secret"],
+          "properties": {
+            "kind": { "enum": ["bearer", "apiKey"] },
+            "secret": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "secret", "oauth"],
+          "properties": {
+            "kind": { "const": "oauth" },
+            "secret": { "type": "string", "minLength": 1 },
+            "oauth": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["access"],
+              "properties": {
+                "access": { "type": "string", "minLength": 1 },
+                "refresh": { "type": "string", "minLength": 1 },
+                "expiresAtMs": { "$ref": "#/$defs/epochMs" },
+                "refreshEndpoint": { "type": "string", "format": "uri" },
+                "clientId": { "type": "string", "minLength": 1 },
+                "identity": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "usageUnit": { "enum": ["percent", "tokens", "requests", "usd", "minutes", "bytes", "unknown"] },
+    "severity": { "enum": ["ok", "warning", "critical", "exhausted", "unknown"] },
+    "productKind": { "enum": ["quota", "billingUsage", "organizationUsage", "localActivity"] },
+    "reportSourceKind": {
+      "enum": ["localObserved", "documentedApi", "firstPartyApi", "privateApi", "browserSession", "noQuotaApi"]
+    },
+    "usageWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "unit", "severity"],
+      "anyOf": [
+        { "required": ["resolvedFraction"] },
+        { "required": ["used"] },
+        { "required": ["limit"] },
+        { "required": ["resetCredits"] }
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string" },
+        "unit": { "$ref": "#/$defs/usageUnit" },
+        "resolvedFraction": { "type": "number", "minimum": 0 },
+        "severity": { "$ref": "#/$defs/severity" },
+        "used": { "type": "number", "minimum": 0 },
+        "limit": { "type": "number", "exclusiveMinimum": 0 },
+        "resetsAtMs": { "$ref": "#/$defs/epochMs" },
+        "resetCredits": { "type": "number", "minimum": 0 }
+      }
+    },
+    "usageReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productKind", "sourceKind", "fetchedAtMs", "connectorVersion", "windows"],
+      "properties": {
+        "productKind": { "$ref": "#/$defs/productKind" },
+        "sourceKind": { "$ref": "#/$defs/reportSourceKind" },
+        "fetchedAtMs": { "$ref": "#/$defs/epochMs" },
+        "connectorVersion": { "type": "string", "minLength": 1 },
+        "windows": { "type": "array", "items": { "$ref": "#/$defs/usageWindow" } }
+      }
+    },
+    "bridgeErrorKind": {
+      "enum": [
+        "invalidRequest",
+        "invalidProtocol",
+        "invalidProvider",
+        "invalidPolicy",
+        "missingCredential",
+        "authRequired",
+        "permissionDenied",
+        "rateLimited",
+        "noData",
+        "transport",
+        "timeout",
+        "malformedPayload",
+        "partialPayload",
+        "upstreamError",
+        "dependencyUnavailable",
+        "internalError"
+      ]
+    },
+    "bridgeErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/bridgeErrorKind" },
+        "message": { "type": "string", "minLength": 1 },
+        "retryAfterMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

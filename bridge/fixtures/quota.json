@@ -1,0 +1,58 @@
+{
+  "snapshotVersion": "fixture-1",
+  "notes": "demo-quota-snapshot",
+  "fetchedAtMs": 1787011200000,
+  "windows": [
+    {
+      "id": "premium-requests-5h",
+      "label": "Premium requests (5h)",
+      "unit": "requests",
+      "used": 80,
+      "limit": 100,
+      "resetsAtMs": 1787014800000
+    },
+    {
+      "id": "core-tokens-5h",
+      "label": "Core tokens (5h)",
+      "unit": "tokens",
+      "remainingFraction": 0.05,
+      "resetsAtMs": 1787014800000
+    },
+    {
+      "id": "spend-usd-monthly",
+      "label": "Included spend (monthly)",
+      "unit": "usd",
+      "used": 1200,
+      "limit": 1000,
+      "resetsAtMs": 1789603200000
+    },
+    {
+      "id": "explicit-requests-7d",
+      "label": "Explicit fraction (7d)",
+      "unit": "requests",
+      "fraction": 0.25,
+      "used": 25,
+      "limit": 100
+    },
+    {
+      "id": "percent-minutes-weekly",
+      "label": "Minutes consumed (weekly)",
+      "unit": "minutes",
+      "percentUsed": 42
+    },
+    {
+      "id": "capacity-percent-daily",
+      "label": "Capacity (daily)",
+      "unit": "percent",
+      "percentUsed": 76,
+      "resetsAtMs": 1787022000000
+    },
+    {
+      "id": "bonus-credits-reset",
+      "label": "Bonus credits",
+      "unit": "unknown",
+      "resetCredits": 120,
+      "resetsAtMs": 1787014800000
+    }
+  ]
+}

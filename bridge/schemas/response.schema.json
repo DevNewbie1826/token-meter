@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://token-meter.app/schemas/TokenMeter/1.2.0/response.schema.json",
+  "title": "TokenMeter/1.2.0 bridge response",
+  "description": "One strict UTF-8 JSON object written to stdout. Maximum 2 MiB. Correlation fields echo the request when the request was parseable; they are absent only when the request itself could not be identified.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "providerId",
+        "connectorId",
+        "accountRef",
+        "status",
+        "completedAtMs",
+        "report"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "requestId": { "$ref": "common.schema.json#/$defs/requestId" },
+        "providerId": { "$ref": "common.schema.json#/$defs/providerId" },
+        "connectorId": { "$ref": "common.schema.json#/$defs/connectorId" },
+        "accountRef": { "$ref": "common.schema.json#/$defs/accountRef" },
+        "completedAtMs": { "$ref": "common.schema.json#/$defs/epochMs" },
+        "status": { "const": "ok" },
+        "report": { "$ref": "common.schema.json#/$defs/usageReport" },
+        "refreshedCredential": { "$ref": "common.schema.json#/$defs/credential" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "status", "completedAtMs", "error"],
+      "properties": {
+        "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+        "requestId": { "$ref": "common.schema.json#/$defs/requestId" },
+        "providerId": { "$ref": "common.schema.json#/$defs/providerId" },
+        "connectorId": { "$ref": "common.schema.json#/$defs/connectorId" },
+        "accountRef": { "$ref": "common.schema.json#/$defs/accountRef" },
+        "completedAtMs": { "$ref": "common.schema.json#/$defs/epochMs" },
+        "status": { "const": "error" },
+        "error": { "$ref": "common.schema.json#/$defs/bridgeErrorPayload" },
+        "refreshedCredential": { "$ref": "common.schema.json#/$defs/credential" }
+      }
+    }
+  ]
+}

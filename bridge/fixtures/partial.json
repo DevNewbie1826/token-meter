@@ -1,0 +1,20 @@
+{
+  "snapshotVersion": "fixture-1",
+  "fetchedAtMs": 1787011200000,
+  "windows": [
+    {
+      "id": "premium-requests-5h",
+      "label": "Premium requests (5h)",
+      "unit": "requests",
+      "used": 80,
+      "limit": 100,
+      "resetsAtMs": 1787014800000
+    },
+    {
+      "id": "core-tokens-5h",
+      "label": "Core tokens (5h)",
+      "unit": "tokens",
+      "resetsAtMs": 1787014800000
+    }
+  ]
+}

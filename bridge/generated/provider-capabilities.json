@@ -1,0 +1,320 @@
+{
+	"schemaVersion": "1.2.0",
+	"syncedFromSha": "8500092296621a6826b7136e840f8a59ea338958",
+	"providers": [
+		{
+			"id": "alibaba-token-plan",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-alibaba-token-plan",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "browserSession",
+			"authorizationBasis": "browserSession",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"5h",
+				"7d"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "anthropic",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-anthropic",
+			"authMethods": [
+				"browser"
+			],
+			"credentialKinds": [
+				"oauth"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"5h",
+				"7d"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "cursor",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-cursor",
+			"authMethods": [
+				"browser",
+				"apiKey"
+			],
+			"credentialKinds": [
+				"oauth",
+				"bearer"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"monthly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "github-copilot",
+			"supportTier": "supported",
+			"connectorTransport": "builtin-github-billing",
+			"authMethods": [
+				"apiKey",
+				"device"
+			],
+			"credentialKinds": [
+				"bearer",
+				"apiKey"
+			],
+			"productKind": "billingUsage",
+			"sourceKind": "documentedApi",
+			"authorizationBasis": "documentedUserBilling",
+			"declaredUnit": "requests",
+			"declaredWindows": [
+				"monthly"
+			],
+			"pollingPolicy": "authorizedDefault"
+		},
+		{
+			"id": "google-antigravity",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-google-antigravity",
+			"authMethods": [
+				"browser"
+			],
+			"credentialKinds": [
+				"oauth"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"daily",
+				"weekly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "google-gemini-cli",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-google-gemini-cli",
+			"authMethods": [
+				"browser"
+			],
+			"credentialKinds": [
+				"oauth"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "percent",
+			"declaredWindows": [],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "kimi-code",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-kimi-code",
+			"authMethods": [
+				"device",
+				"apiKey"
+			],
+			"credentialKinds": [
+				"oauth",
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "unknown",
+			"declaredWindows": [
+				"5h",
+				"7d"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "minimax-code",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-minimax-code",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"weekly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "ollama",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-ollama",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey",
+				"none"
+			],
+			"productKind": "localActivity",
+			"sourceKind": "noQuotaApi",
+			"authorizationBasis": "deviceNone",
+			"declaredUnit": "unknown",
+			"declaredWindows": [],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "ollama-cloud",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-ollama-cloud",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "localActivity",
+			"sourceKind": "noQuotaApi",
+			"authorizationBasis": "deviceNone",
+			"declaredUnit": "unknown",
+			"declaredWindows": [],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "openai-codex",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-openai-codex",
+			"authMethods": [
+				"browser",
+				"device"
+			],
+			"credentialKinds": [
+				"oauth"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "percent",
+			"declaredWindows": [],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "opencode-go",
+			"supportTier": "bestEffort",
+			"connectorTransport": "builtin-opencode-go",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"5h",
+				"7d",
+				"monthly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "synthetic",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-synthetic",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "requests",
+			"declaredWindows": [
+				"5h",
+				"7d"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "umans",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-umans",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "requests",
+			"declaredWindows": [
+				"5h"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "xai-oauth",
+			"supportTier": "excluded",
+			"connectorTransport": "builtin-xai-oauth",
+			"authMethods": [
+				"device"
+			],
+			"credentialKinds": [
+				"oauth"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "subscriptionOAuth",
+			"declaredUnit": "unknown",
+			"declaredWindows": [
+				"weekly",
+				"monthly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
+			"id": "zai",
+			"supportTier": "conditional",
+			"connectorTransport": "builtin-zai",
+			"authMethods": [
+				"apiKey",
+				"browser"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "privateApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "tokens",
+			"declaredWindows": [
+				"5h",
+				"7d"
+			],
+			"pollingPolicy": "notPolled"
+		}
+	]
+}
