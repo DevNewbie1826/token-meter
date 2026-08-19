@@ -664,8 +664,7 @@ final class TokenMeterViewModel: ObservableObject {
     /// than only due ones.
     private func refreshDueProviders() {
         for providerId in registeredProviderIDs {
-            guard let provider = catalog.providers.first(where: { $0.id == providerId }),
-                  provider.allowsAutomaticRefresh,
+            guard catalog.providers.contains(where: { $0.id == providerId }),
                   !refreshingProviderIDs.contains(providerId)
             else { continue }
             Task { [weak self] in
@@ -924,9 +923,7 @@ final class TokenMeterViewModel: ObservableObject {
                 freshness: nil,
                 error: nil
             ))
-            if provider.allowsAutomaticRefresh {
-                automaticProviders.append(provider.id)
-            }
+            automaticProviders.append(provider.id)
         }
         for providerId in automaticProviders {
             Task { [weak self] in await self?.refresh(providerId: providerId) }

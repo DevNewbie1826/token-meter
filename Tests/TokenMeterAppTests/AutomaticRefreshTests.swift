@@ -3,10 +3,10 @@ import XCTest
 import TokenMeterCore
 @testable import TokenMeterApp
 
-/// Automatic refresh lifecycle: a tick refreshes registered providers whose
-/// capability allows automatic refresh, skips providers whose capability
-/// does not, and a second start reuses the installed driver instead of
-/// adding a second one.
+/// Automatic refresh lifecycle: a tick refreshes EVERY registered
+/// provider with a usable credential — OMP's `pollingPolicy` gates the
+/// coding agent's own polling, not this app's quota display — and a second
+/// start reuses the installed driver instead of adding a second one.
 ///
 /// Determinism: ticks are driven through `RefreshAutomation.fire()` so no
 /// real timer fires; the fake bridge's fetch callback is the completion
@@ -41,7 +41,8 @@ final class AutomaticRefreshTests: XCTestCase {
         }
     }
 
-    /// Registers the sole catalog provider that allows automatic refresh.
+    /// Registers github-copilot — historically the sole `authorizedDefault`
+    /// provider — as a second registered account for tick coverage.
     /// `register` awaits its initial refresh, so the setup itself is
     /// deterministic.
     private func registerAutomaticCapableProvider(_ model: TokenMeterViewModel) async {
@@ -80,9 +81,9 @@ final class AutomaticRefreshTests: XCTestCase {
         XCTAssertEqual(model.refreshAutomation?.isRunning, false)
     }
 
-    // MARK: - Tick skips providers without the capability
+    // MARK: - Tick refreshes every registered provider
 
-    func testTickSkipsRegisteredProviderWithoutAutomaticRefreshCapability() async throws {
+    func testTickRefreshesEveryRegisteredProviderIncludingNotPolled() async throws {
         let bridge = AppTestBridge()
         stubBridgeLogins(bridge)
         let model = makeModel(bridge: bridge)
@@ -90,22 +91,18 @@ final class AutomaticRefreshTests: XCTestCase {
         await registerAutomaticCapableProvider(model)
         let requestsBeforeTick = bridge.usageRequests.count
 
-        // The capable provider's tick fetch is the deterministic signal
-        // that the whole tick ran; every task the tick spawns was already
-        // spawned synchronously inside fire().
-        let tickFetch = expectation(description: "automatic tick usage fetch")
-        bridge.onUsage = { tickFetch.fulfill() }
+        let tickFetches = expectation(description: "tick fetches both providers")
+        tickFetches.expectedFulfillmentCount = 2
+        bridge.onUsage = { tickFetches.fulfill() }
         model.startAutomaticRefresh()
         try XCTUnwrap(model.refreshAutomation).fire()
-        await fulfillment(of: [tickFetch], timeout: 2)
+        await fulfillment(of: [tickFetches], timeout: 2)
 
         let tickRequests = bridge.usageRequests.dropFirst(requestsBeforeTick)
-        XCTAssertEqual(tickRequests.count, 1, "only the automatic-refresh-capable provider is fetched on a tick")
-        XCTAssertEqual(tickRequests.first?.providerId, "github-copilot")
         XCTAssertEqual(
-            model.isRegistered("anthropic"),
-            true,
-            "the incapable provider stays registered; it is merely not auto-refreshed"
+            Set(tickRequests.map(\.providerId)),
+            Set(["anthropic", "github-copilot"]),
+            "a tick refreshes every registered provider, including notPolled ones"
         )
     }
 

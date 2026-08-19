@@ -209,6 +209,34 @@ final class UsageRefreshBehaviorTests: XCTestCase {
 
     // MARK: - Authorized default auto-refresh
 
+    func testNotPolledProviderRestoresWithAutomaticRefresh() async throws {
+        let directory = temporaryStoreDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let metadata = try ProviderManagementStore(storageDirectory: directory)
+        let accountRef = UUID().uuidString
+        try metadata.upsert(account: AccountRecord(
+            providerId: "cursor",
+            accountRef: accountRef,
+            displayName: "Cursor",
+            credentialRevision: 1
+        ))
+        let credentials = AppTestCredentialStore()
+        try credentials.save(
+            credential: .staticCredential(kind: .bearer, secret: "restored-cursor-token"),
+            for: accountRef
+        )
+        let bridge = AppTestBridge()
+        let fetched = expectation(description: "notPolled restore usage fetch")
+        bridge.onUsage = { fetched.fulfill() }
+
+        let model = makeModel(credentials: credentials, bridge: bridge, metadata: metadata)
+        await fulfillment(of: [fetched], timeout: 2)
+
+        XCTAssertEqual(model.isRegistered("cursor"), true)
+        XCTAssertEqual(bridge.usageRequests.first?.providerId, "cursor")
+        XCTAssertEqual(bridge.usageRequests.first?.connectorId, "cursor")
+    }
+
     func testAuthorizedDefaultProviderRestoresWithAutomaticRefresh() async throws {
         let directory = temporaryStoreDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
