@@ -277,6 +277,26 @@ describe("zaiConnector — quota mapping", () => {
     expectNoModelFields(response);
   });
 
+  test("uses the shared wire severity bands", async () => {
+    const limits = [
+      { type: "TOKENS_LIMIT", usage: 600000, currentValue: 510000, percentage: 85, unit: 6 },
+      { type: "TIME_LIMIT", usage: 1200, currentValue: 1152, percentage: 96, unit: 4, number: 1 },
+      { type: "TOKENS_LIMIT", usage: 100, currentValue: 80, percentage: 80, unit: 3 },
+      { type: "TOKENS_LIMIT", usage: 100, currentValue: 95, percentage: 95, unit: 5 },
+      { type: "TOKENS_LIMIT", usage: 100, currentValue: 100, percentage: 100, unit: 99 },
+    ];
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: { success: true, code: 200, data: { limits } } } });
+    const response = await zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS });
+
+    expect(response.report.windows.map((window) => window.severity)).toEqual([
+      "warning",
+      "critical",
+      "warning",
+      "critical",
+      "exhausted",
+    ]);
+  });
+
   test("keeps the credential out of the serialized response", async () => {
     const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: QUOTA_BODY } });
     const response = await zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS });

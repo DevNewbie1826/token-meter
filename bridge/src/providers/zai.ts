@@ -16,8 +16,10 @@
  *   + zread become separate "zread" rows), unit enums 3/4/5/6 -> `${n}h` /
  *   `${n}d` / `${n}mo` / `1w` windows, anything else -> opaque `${n}u${unit}`
  *   ids; fraction from `percentage` (clamped /100) else currentValue/usage;
- *   nextResetTime epoch coercion (seconds -> ms); OMP zai severity bands
- *   (>=1 exhausted, >=0.9 warning, else ok).
+ *   nextResetTime epoch coercion (seconds -> ms); severity uses the shared
+ *   wire bands (>=0.8 warning / >=0.95 critical / >=1 exhausted) because the
+ *   Swift UsageResponseDecoder recomputes severity from resolvedFraction and
+ *   rejects mismatches as "inconsistent severity".
  * - Browser login: authorization-code flow against chat.z.ai with client id
  *   client_P8X5CMWmlaRO9gyO-KSqtg and NO PKCE (ZCode parity), non-standard
  *   token body {provider, code, redirect_uri, state} to zcode.z.ai, then the
@@ -64,7 +66,8 @@ import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
 import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeRequest, BridgeSuccessResponse, Severity, UsageReport, UsageWindow } from "../protocol";
+import type { BridgeRequest, BridgeSuccessResponse, UsageReport, UsageWindow } from "../protocol";
+import { severityForFraction } from "../protocol";
 
 // ---------------------------------------------------------------------------
 // Usage connector (OMP packages/ai/src/usage/zai.ts)
@@ -279,20 +282,6 @@ function zaiFractionFor(parsed: ZaiLimitItem): number | undefined {
   return undefined;
 }
 
-/** OMP getUsageStatus: >=1 exhausted, >=0.9 warning, else ok; undefined -> unknown. */
-function zaiSeverityFor(fraction: number | undefined): Severity {
-  if (fraction === undefined) {
-    return "unknown";
-  }
-  if (fraction >= 1) {
-    return "exhausted";
-  }
-  if (fraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
-}
-
 /**
  * One bridge UsageWindow per OMP-normalized limit: TOKENS_LIMIT -> tokens
  * quota, TIME_LIMIT -> requests quota (zread feature rows separated).
@@ -300,7 +289,7 @@ function zaiSeverityFor(fraction: number | undefined): Severity {
 function windowForZaiLimit(parsed: ZaiLimitItem): UsageWindow | undefined {
   const identity = buildZaiWindowIdentity(parsed);
   const fraction = zaiFractionFor(parsed);
-  const severity = zaiSeverityFor(fraction);
+  const severity = severityForFraction(fraction);
   const amounts = {
     ...(fraction !== undefined ? { resolvedFraction: fraction } : {}),
     ...(parsed.currentValue !== undefined ? { used: parsed.currentValue } : {}),
