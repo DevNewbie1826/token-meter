@@ -273,22 +273,26 @@ describe("githubCopilotConnector", () => {
   test("maps 401 to authRequired", async () => {
     const fetcher = mockFetcher({
       [`GET ${USER_URL}`]: { status: 401, body: { message: "Bad credentials" } },
+      [`GET ${QUOTA_URL}`]: { status: 401, body: { message: "Bad credentials" } },
     });
     const error = await expectKind(
       () => githubCopilotConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS }),
       "authRequired",
     );
+    expect(fetcher.calls.map((call) => call.url)).toEqual([USER_URL, QUOTA_URL]);
     expect(error.message).not.toContain(TOKEN);
   });
 
   test("maps 429 with Retry-After to rateLimited", async () => {
     const fetcher = mockFetcher({
       [`GET ${USER_URL}`]: { status: 429, headers: { "retry-after": "30" }, body: { message: "slow down" } },
+      [`GET ${QUOTA_URL}`]: { status: 429, headers: { "retry-after": "30" }, body: { message: "slow down" } },
     });
     const error = await expectKind(
       () => githubCopilotConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS }),
       "rateLimited",
     );
+    expect(fetcher.calls.map((call) => call.url)).toEqual([USER_URL, QUOTA_URL]);
     expect(error.retryAfterMs).toBe(30_000);
   });
 
@@ -304,11 +308,13 @@ describe("githubCopilotConnector", () => {
     const fetcher = mockFetcher({
       [`GET ${USER_URL}`]: { status: 200, body: { login: "octocat" } },
       [`GET ${BILLING_URL}`]: { status: 200, body: { usageItems: [] } },
+      [`GET ${QUOTA_URL}`]: { status: 200, body: { copilot_plan: "pro", quota_snapshots: {} } },
     });
     await expectKind(
       () => githubCopilotConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS }),
       "noData",
     );
+    expect(fetcher.calls.map((call) => call.url)).toEqual([USER_URL, BILLING_URL, QUOTA_URL]);
   });
 });
 
