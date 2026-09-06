@@ -1,12 +1,12 @@
 /**
- * Locked 16-provider capability registry.
+ * Locked 17-provider capability registry (16 OMP-derived, one app-owned).
  *
  * REGISTRY_VERSION versions this capability manifest independently from the
  * TokenMeter bridge wire protocol (./protocol PROTOCOL_VERSION): the two may
  * drift apart on purpose, and `providers --format json` always emits this
  * registry version — never the wire version.
  *
- * Labels are pinned from the token-meter research verdicts against OMP SHA
+ * OMP-derived labels are pinned from the token-meter research verdicts against OMP SHA
  * 8500092296621a6826b7136e840f8a59ea338958. Registry sync may confirm or add
  * source metadata, but it can never silently promote support tier,
  * authorization basis or polling policy. No model catalog fields exist here.
@@ -22,7 +22,7 @@ import type { ProductKind, ReportSourceKind, UsageUnit } from "./protocol";
 /** Capability manifest version; separate from the TokenMeter wire version. */
 export const REGISTRY_VERSION = "1.2.0";
 
-export const LOCKED_PROVIDER_IDS = [
+export const OMP_PROVIDER_IDS = [
   "alibaba-token-plan",
   "anthropic",
   "cursor",
@@ -40,7 +40,10 @@ export const LOCKED_PROVIDER_IDS = [
   "xai-oauth",
   "zai",
 ] as const;
-export type LockedProviderId = (typeof LOCKED_PROVIDER_IDS)[number];
+/** App-owned integrations are not required to appear in OMP discovery. */
+export const APP_OWNED_PROVIDER_IDS = ["nekos"] as const;
+export type LockedProviderId = (typeof OMP_PROVIDER_IDS)[number] | (typeof APP_OWNED_PROVIDER_IDS)[number];
+export const LOCKED_PROVIDER_IDS: readonly LockedProviderId[] = [...OMP_PROVIDER_IDS, ...APP_OWNED_PROVIDER_IDS].sort();
 
 export const SUPPORT_TIERS = ["supported", "bestEffort", "conditional", "excluded"] as const;
 export type SupportTier = (typeof SUPPORT_TIERS)[number];
@@ -54,6 +57,7 @@ export const CONNECTOR_TRANSPORTS = [
   "builtin-google-gemini-cli",
   "builtin-kimi-code",
   "builtin-minimax-code",
+  "builtin-nekos",
   "builtin-ollama",
   "builtin-ollama-cloud",
   "builtin-openai-codex",
@@ -85,7 +89,7 @@ export const AUTHORIZATION_BASES = [
 ] as const;
 export type AuthorizationBasis = (typeof AUTHORIZATION_BASES)[number];
 
-export const DECLARED_WINDOWS = ["5h", "7d", "daily", "weekly", "monthly"] as const;
+export const DECLARED_WINDOWS = ["3h", "5h", "7d", "daily", "weekly", "monthly"] as const;
 export type DeclaredWindow = (typeof DECLARED_WINDOWS)[number];
 
 export const POLLING_POLICIES = ["authorizedDefault", "notPolled"] as const;
@@ -208,6 +212,19 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     authorizationBasis: "apiKey",
     declaredUnit: "percent",
     declaredWindows: ["weekly"],
+    pollingPolicy: "notPolled",
+  },
+  {
+    id: "nekos",
+    supportTier: "bestEffort",
+    connectorTransport: "builtin-nekos",
+    authMethods: ["apiKey"],
+    credentialKinds: ["apiKey"],
+    productKind: "quota",
+    sourceKind: "firstPartyApi",
+    authorizationBasis: "apiKey",
+    declaredUnit: "percent",
+    declaredWindows: ["3h", "daily", "weekly"],
     pollingPolicy: "notPolled",
   },
   {

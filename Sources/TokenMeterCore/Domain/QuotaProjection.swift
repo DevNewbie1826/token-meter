@@ -56,6 +56,8 @@ public struct QuotaRow: Equatable, Sendable {
     /// Milliseconds until the window resets, from the injected `nowMs`.
     public let resetsInMs: Int64?
     public let windowSeconds: Int64?
+    /// Provider-provided display label, verbatim from the decoded limit.
+    public let label: String?
 }
 
 /// Everything the projection needs for one account at one instant.
@@ -111,7 +113,8 @@ public struct QuotaProjector: Sendable {
                 used: limit.utilization.used,
                 limit: limit.utilization.limit,
                 resetsInMs: limit.resetsAtMs.map { $0 - nowMs },
-                windowSeconds: limit.windowSeconds
+                windowSeconds: limit.windowSeconds,
+                label: limit.label
             )
         }
     }

@@ -54,7 +54,13 @@ struct QuotaRowView: View {
     }
 
     private var windowLabel: String {
-        switch row.windowSeconds {
+        // A nonempty provider-provided label wins over the derived window
+        // text; absent/empty keeps the existing windowSeconds/limitId
+        // fallback untouched.
+        if let label = row.label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return label
+        }
+        return switch row.windowSeconds {
         case 18_000:
             "5시간"
         case 604_800:
@@ -70,7 +76,7 @@ struct QuotaRowView: View {
 
     private var amountLabel: String {
         if let fraction = row.fraction {
-            return "\(Int((fraction * 100).rounded()))% 사용"
+            return "\(String(format: "%.0f", (fraction * 100).rounded()))% 사용"
         }
         if let used = row.used, let limit = row.limit {
             return "\(formatted(used)) / \(formatted(limit)) \(unitLabel)"

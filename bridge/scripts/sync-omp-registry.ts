@@ -6,9 +6,10 @@
  * packages/ai/src/auth-storage.ts (scanner-based; OMP code is never imported
  * or executed), and emits a deterministic sorted capability manifest.
  *
- * A locked provider missing from the checkout fails loudly. A newly
+ * An OMP-derived locked provider missing from the checkout fails loudly. A newly
  * discovered provider is emitted excluded/external pending capability review —
  * sync never promotes support tier, authorization basis or polling policy.
+ * App-owned providers are merged independently of OMP discovery.
  *
  * Usage:
  *   bun scripts/sync-omp-registry.ts --checkout <absolute-path> [--out <path>]
@@ -17,7 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { REGISTRY_VERSION, listProviderCapabilities } from "../src/registry";
+import { APP_OWNED_PROVIDER_IDS, OMP_PROVIDER_IDS, REGISTRY_VERSION, listProviderCapabilities } from "../src/registry";
 import type { ProviderCapability } from "../src/registry";
 import { extractIdentifierArray, extractNamedImports, extractObjectPropertyString } from "./omp-source-reader";
 
@@ -73,15 +74,16 @@ export function buildCapabilityManifest(input: {
   const locked = new Map<string, ProviderCapability>(
     listProviderCapabilities().map((capability) => [capability.id, capability]),
   );
-  const sorted = [...new Set(input.discovered.map((provider) => provider.id))].sort(compareIds);
+  const discoveredIds = new Set(input.discovered.map((provider) => provider.id));
+  const missing = OMP_PROVIDER_IDS.filter((id) => !discoveredIds.has(id));
+  if (missing.length > 0) {
+    throw new OmpSyncError("lockedProviderMissing", `locked provider(s) missing from OMP checkout: ${missing.join(", ")}`);
+  }
+  const sorted = [...new Set([...discoveredIds, ...APP_OWNED_PROVIDER_IDS])].sort(compareIds);
   const providers: ManifestProvider[] = sorted.map((id) => {
     const capability = locked.get(id);
     return capability === undefined ? pendingEntry(id) : capability;
   });
-  const missing = [...locked.keys()].filter((id) => !sorted.includes(id));
-  if (missing.length > 0) {
-    throw new OmpSyncError("lockedProviderMissing", `locked provider(s) missing from OMP checkout: ${missing.join(", ")}`);
-  }
   return { schemaVersion: REGISTRY_VERSION, syncedFromSha: input.headSha, providers };
 }
 

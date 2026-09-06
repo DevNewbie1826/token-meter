@@ -92,7 +92,7 @@ final class TokenMeterViewModelTests: XCTestCase {
     }
 
     func testEveryCatalogProviderExposesManifestDerivedRegistrationMethods() {
-        XCTAssertEqual(ProviderCatalog.locked.providers.count, 16)
+        XCTAssertEqual(ProviderCatalog.locked.providers.count, 17)
         for provider in ProviderCatalog.locked.providers {
             XCTAssertFalse(provider.registrationMethods.isEmpty, provider.id)
             XCTAssertEqual(

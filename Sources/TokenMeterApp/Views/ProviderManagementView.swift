@@ -10,7 +10,7 @@ struct ProviderManagementView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("프로바이더 관리")
                     .font(.title2.bold())
-                Text("OMP usage registry에서 동기화한 16개 프로바이더입니다. 모델 목록은 가져오지 않습니다.")
+                Text("카탈로그에 등록된 \(model.catalog.providers.count)개 프로바이더입니다. 모델 목록은 가져오지 않습니다.")
                     .foregroundStyle(.secondary)
             }
 

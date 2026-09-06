@@ -163,6 +163,27 @@
 			"pollingPolicy": "notPolled"
 		},
 		{
+			"id": "nekos",
+			"supportTier": "bestEffort",
+			"connectorTransport": "builtin-nekos",
+			"authMethods": [
+				"apiKey"
+			],
+			"credentialKinds": [
+				"apiKey"
+			],
+			"productKind": "quota",
+			"sourceKind": "firstPartyApi",
+			"authorizationBasis": "apiKey",
+			"declaredUnit": "percent",
+			"declaredWindows": [
+				"3h",
+				"daily",
+				"weekly"
+			],
+			"pollingPolicy": "notPolled"
+		},
+		{
 			"id": "ollama",
 			"supportTier": "conditional",
 			"connectorTransport": "builtin-ollama",

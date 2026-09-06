@@ -12,8 +12,8 @@ final class RegistrationActionsTests: XCTestCase {
         TokenMeterViewModel(credentialStore: AppTestCredentialStore(), bridge: AppTestBridge())
     }
 
-    func testAllSixteenProvidersExposeAtLeastOneRegistrationAction() {
-        XCTAssertEqual(ProviderCatalog.locked.providers.count, 16)
+    func testAllSeventeenProvidersExposeAtLeastOneRegistrationAction() {
+        XCTAssertEqual(ProviderCatalog.locked.providers.count, 17)
         let model = self.model
         for provider in ProviderCatalog.locked.providers {
             let actions = model.registrationActions(for: provider.id)

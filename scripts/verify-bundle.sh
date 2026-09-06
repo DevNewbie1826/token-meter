@@ -91,7 +91,7 @@ registry = json.load(open(resource_path))
 assert listing["schemaVersion"] == expected_version, listing["schemaVersion"]
 assert registry["schemaVersion"] == expected_version, registry["schemaVersion"]
 ids = [p["id"] for p in listing["providers"]]
-assert len(ids) == 16 and len(set(ids)) == 16, ids
+assert len(ids) == 17 and len(set(ids)) == 17, ids
 listing_methods = {p["id"]: p["authMethods"] for p in listing["providers"]}
 registry_methods = {p["id"]: p["authMethods"] for p in registry["providers"]}
 assert listing_methods == registry_methods, (listing_methods, registry_methods)

@@ -94,7 +94,7 @@ import glob, json, os, sys
 providers = json.load(open(sys.argv[1]))
 ids = [p['id'] for p in providers['providers']]
 assert providers['schemaVersion'] == '1.2.0', providers['schemaVersion']
-assert len(ids) == 16 and len(set(ids)) == 16, ids
+assert len(ids) == 17 and len(set(ids)) == 17, ids
 usage = json.load(open(sys.argv[2]))
 assert usage['requestId'] == '00000000-0000-4000-8000-000000000001'
 assert usage['status'] == 'ok', usage.get('status')
