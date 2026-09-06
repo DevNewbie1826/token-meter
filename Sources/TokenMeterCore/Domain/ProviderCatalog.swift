@@ -132,6 +132,7 @@ public enum PollingPolicy: String, Codable, Equatable, Sendable, CaseIterable {
 }
 
 public enum DeclaredWindow: String, Codable, Equatable, Sendable, CaseIterable {
+    case threeHour = "3h"
     case fiveHour = "5h"
     case sevenDay = "7d"
     case daily
@@ -346,7 +347,7 @@ public struct ProviderCatalog: Equatable, Sendable, Codable {
 // MARK: - Locked set
 
 public extension ProviderCatalog {
-    /// Pinned OMP checkout the 16 locked capabilities were synchronized from.
+    /// Pinned OMP checkout the 16 OMP-derived capabilities were synchronized from.
     static let ompPinnedSHA = "8500092296621a6826b7136e840f8a59ea338958"
 
     /// Display-name metadata deliberately kept outside the registry wire;
@@ -360,6 +361,7 @@ public extension ProviderCatalog {
         "google-gemini-cli": "Google Gemini CLI",
         "kimi-code": "Kimi Code",
         "minimax-code": "MiniMax Code",
+        "nekos": "Nekos Claude",
         "ollama": "Ollama",
         "ollama-cloud": "Ollama Cloud",
         "openai-codex": "OpenAI Codex",
@@ -370,15 +372,18 @@ public extension ProviderCatalog {
         "zai": "Z.ai",
     ]
 
-    /// The 16 locked provider IDs, unique and sorted.
+    /// The 17 locked provider IDs (16 OMP-derived plus app-owned Nekos), unique and sorted.
     static let lockedProviderIds: [String] = locked.providers.map(\.id).sorted()
 
     /// The one shipped capability contract: the packaged registry resource,
     /// strictly decoded on first access. A missing or undecodable resource is
     /// a packaging defect, not a runtime condition the app can recover from.
     static let locked: ProviderCatalog = {
+        let packagedBundle = Bundle.main.url(forResource: "token-meter_TokenMeterCore", withExtension: "bundle")
+            .flatMap(Bundle.init(url:))
+        let resourceBundle = packagedBundle ?? Bundle.module
         guard
-            let url = Bundle.module.url(forResource: "provider-capabilities", withExtension: "json")
+            let url = resourceBundle.url(forResource: "provider-capabilities", withExtension: "json")
         else {
             fatalError("provider-capabilities.json is missing from the TokenMeterCore resource bundle")
         }

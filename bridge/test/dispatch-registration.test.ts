@@ -14,7 +14,7 @@ const BILLING_URL = "https://api.github.com/users/octocat/settings/billing/premi
 
 describe("provider registration", () => {
   test("resolves a connector and an auth module for every locked provider", () => {
-    expect(LOCKED_PROVIDER_IDS.length).toBe(16);
+    expect(LOCKED_PROVIDER_IDS.length).toBe(17);
     for (const id of LOCKED_PROVIDER_IDS) {
       const connector = lookupConnector(id);
       const auth = lookupAuth(id);

@@ -203,6 +203,10 @@ public struct UsageResponseDecoder: Sendable {
                 entry["resetCredits"],
                 name: "resetCredits"
             )
+            let label = entry["label"] as? String
+            guard entry["label"] == nil || label != nil else {
+                throw BridgeServiceError.malformedPayload("invalid label")
+            }
             let utilization = try Self.resolveUtilization(
                 limitId: limitId,
                 fraction: fraction,
@@ -220,7 +224,8 @@ public struct UsageResponseDecoder: Sendable {
                 unit: unit,
                 utilization: utilization,
                 windowSeconds: nil,
-                resetsAtMs: resetsAtMs
+                resetsAtMs: resetsAtMs,
+                label: label
             ))
         }
         return UsageReport(
@@ -283,4 +288,5 @@ public struct UsageResponseDecoder: Sendable {
         }
         return value
     }
+
 }

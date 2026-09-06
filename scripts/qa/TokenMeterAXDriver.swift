@@ -1169,6 +1169,14 @@ func launchApp(scenario: Scenario, path: String) async throws -> (process: Proce
 @MainActor
 func run() async throws {
     let arguments = CommandLine.arguments
+    if arguments.dropFirst().first == "nekos-cleanup-test" {
+        try await testNekosProcessCleanup()
+        return
+    }
+    if arguments.count > 1, ["nekos-quota", "nekos-baseline"].contains(arguments[1]) {
+        try await runNekosScenario(arguments)
+        return
+    }
     guard arguments.count >= 3, let scenario = Scenario(rawValue: arguments[1]) else {
         throw DriverFailure.invalidArguments
     }

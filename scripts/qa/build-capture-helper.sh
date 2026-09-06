@@ -27,6 +27,9 @@ xcrun swiftc \
   -warnings-as-errors \
   -parse-as-library \
   "$ROOT/scripts/qa/TokenMeterAXDriver.swift" \
+  "$ROOT/scripts/qa/NekosAXSignal.swift" \
+  "$ROOT/scripts/qa/NekosQALifecycle.swift" \
+  "$ROOT/scripts/qa/NekosAXScenario.swift" \
   -framework AppKit \
   -framework ApplicationServices \
   -framework CoreGraphics \

@@ -21,6 +21,7 @@ import { googleAntigravityAuth, googleAntigravityConnector } from "./google-anti
 import { googleGeminiCliAuth, googleGeminiCliConnector } from "./google-gemini-cli";
 import { kimiCodeAuth, kimiCodeConnector } from "./kimi-code";
 import { minimaxCodeAuth, minimaxCodeConnector } from "./minimax-code";
+import { nekosAuth, nekosConnector } from "./nekos";
 import { ollamaAuth, ollamaConnector } from "./ollama";
 import { ollamaCloudAuth, ollamaCloudConnector } from "./ollama-cloud";
 import { openaiCodexAuth, openaiCodexConnector } from "./openai-codex";
@@ -39,6 +40,7 @@ const REGISTERED_MODULES: ReadonlyArray<readonly [connector: ConnectorModule, au
   [googleGeminiCliConnector, googleGeminiCliAuth],
   [kimiCodeConnector, kimiCodeAuth],
   [minimaxCodeConnector, minimaxCodeAuth],
+  [nekosConnector, nekosAuth],
   [ollamaConnector, ollamaAuth],
   [ollamaCloudConnector, ollamaCloudAuth],
   [openaiCodexConnector, openaiCodexAuth],

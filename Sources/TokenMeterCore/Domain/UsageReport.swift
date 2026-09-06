@@ -50,6 +50,9 @@ public struct QuotaLimit: Equatable, Sendable {
     public let utilization: Utilization
     public let windowSeconds: Int64?
     public let resetsAtMs: Int64?
+    /// Optional provider-provided display label carried verbatim from the
+    /// wire `usageWindow.label`; never a machine-consumed identifier.
+    public let label: String?
 
     public init(
         limitId: String,
@@ -57,7 +60,8 @@ public struct QuotaLimit: Equatable, Sendable {
         unit: UsageUnit,
         utilization: Utilization,
         windowSeconds: Int64? = nil,
-        resetsAtMs: Int64? = nil
+        resetsAtMs: Int64? = nil,
+        label: String? = nil
     ) {
         self.limitId = limitId
         self.productKind = productKind
@@ -65,6 +69,7 @@ public struct QuotaLimit: Equatable, Sendable {
         self.utilization = utilization
         self.windowSeconds = windowSeconds
         self.resetsAtMs = resetsAtMs
+        self.label = label
     }
 }
 

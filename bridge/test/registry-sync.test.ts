@@ -40,6 +40,8 @@ const LOCKED_16 = [
   "zai",
 ] as const;
 
+const LOCKED_17 = [...LOCKED_16, "nekos" as const].sort();
+
 const IDS_WITH_NEWCOMER = [
   "alibaba-token-plan",
   "anthropic",
@@ -49,6 +51,7 @@ const IDS_WITH_NEWCOMER = [
   "google-gemini-cli",
   "kimi-code",
   "minimax-code",
+  "nekos",
   "newcomer-ai",
   "ollama",
   "ollama-cloud",
@@ -212,14 +215,14 @@ describe("registry version pinning", () => {
 });
 
 describe("locked capability registry", () => {
-  test("exposes exactly the 16 locked provider IDs when the registry is listed", () => {
-    expect(LOCKED_PROVIDER_IDS).toEqual(LOCKED_16);
-    expect(new Set(LOCKED_PROVIDER_IDS).size).toBe(16);
+  test("exposes exactly the 17 locked provider IDs when the registry is listed", () => {
+    expect(LOCKED_PROVIDER_IDS).toEqual(LOCKED_17);
+    expect(new Set(LOCKED_PROVIDER_IDS).size).toBe(17);
   });
 
   test("labels every entry with only capability fields when entries are emitted", () => {
     const providers = listProviderCapabilities();
-    expect(providers.map((provider) => provider.id)).toEqual([...LOCKED_16]);
+    expect(providers.map((provider) => provider.id)).toEqual([...LOCKED_17]);
     for (const provider of providers) {
       expect(Object.keys(provider).sort()).toEqual([...ALLOWED_CAPABILITY_KEYS]);
     }
@@ -291,12 +294,12 @@ describe("locked capability registry", () => {
 });
 
 describe("buildCapabilityManifest", () => {
-  test("emits the deterministic sorted 16-entry manifest when the checkout matches the lock", () => {
+  test("emits the deterministic sorted 17-entry manifest when the checkout matches the lock", () => {
     const first = buildCapabilityManifest({ discovered: DISCOVERED_LOCKED, headSha: OMP_PINNED_SHA });
     const second = buildCapabilityManifest({ discovered: DISCOVERED_LOCKED, headSha: OMP_PINNED_SHA });
     expect(first.schemaVersion).toBe("1.2.0");
     expect(first.syncedFromSha).toBe(OMP_PINNED_SHA);
-    expect(first.providers.map((provider) => provider.id)).toEqual([...LOCKED_16]);
+    expect(first.providers.map((provider) => provider.id)).toEqual([...LOCKED_17]);
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
     expectNoModelFields(first);
     const github = first.providers.find((provider) => provider.id === "github-copilot");
@@ -342,13 +345,13 @@ describe("generated manifests", () => {
     expect(JSON.parse(readFileSync(generatedPath, "utf8"))).toEqual(fresh);
   });
 
-  test("carries the 1.2.0 sorted unique 16-provider listing with valid new fields", () => {
+  test("carries the 1.2.0 sorted unique 17-provider listing with valid new fields", () => {
     const manifest = JSON.parse(readFileSync(generatedPath, "utf8")) as ReturnType<typeof buildCapabilityManifest>;
     expect(manifest.schemaVersion).toBe("1.2.0");
     expect(manifest.syncedFromSha).toBe(OMP_PINNED_SHA);
     const ids = manifest.providers.map((provider) => provider.id);
-    expect(ids).toEqual([...LOCKED_16]);
-    expect(new Set(ids).size).toBe(16);
+    expect(ids).toEqual([...LOCKED_17]);
+    expect(new Set(ids).size).toBe(17);
     expect([...ids].sort()).toEqual(ids);
     for (const provider of manifest.providers) {
       expect(provider.authMethods.length).toBeGreaterThan(0);

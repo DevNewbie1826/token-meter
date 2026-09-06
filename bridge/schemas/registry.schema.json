@@ -15,6 +15,7 @@
         "builtin-google-gemini-cli",
         "builtin-kimi-code",
         "builtin-minimax-code",
+        "builtin-nekos",
         "builtin-ollama",
         "builtin-ollama-cloud",
         "builtin-openai-codex",
@@ -45,7 +46,7 @@
     "authorizationBasis": {
       "enum": ["documentedUserBilling", "subscriptionOAuth", "apiKey", "browserSession", "deviceNone", "unreviewed"]
     },
-    "declaredWindow": { "enum": ["5h", "7d", "daily", "weekly", "monthly"] },
+    "declaredWindow": { "enum": ["3h", "5h", "7d", "daily", "weekly", "monthly"] },
     "pollingPolicy": { "enum": ["authorizedDefault", "notPolled"] },
     "providerCapability": {
       "type": "object",
@@ -98,8 +99,8 @@
         "schemaVersion": { "const": "1.2.0" },
         "providers": {
           "type": "array",
-          "minItems": 16,
-          "maxItems": 16,
+          "minItems": 17,
+          "maxItems": 17,
           "items": { "$ref": "#/$defs/providerCapability" }
         }
       }

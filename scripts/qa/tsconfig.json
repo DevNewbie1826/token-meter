@@ -1,0 +1,5 @@
+{
+  "extends": "../../bridge/tsconfig.json",
+  "compilerOptions": { "typeRoots": ["../../bridge/node_modules/@types"] },
+  "include": ["nekos-adapter.ts"]
+}

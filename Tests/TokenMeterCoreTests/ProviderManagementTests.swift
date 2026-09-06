@@ -17,6 +17,7 @@ final class ProviderManagementTests: XCTestCase {
         "google-gemini-cli",
         "kimi-code",
         "minimax-code",
+        "nekos",
         "ollama",
         "ollama-cloud",
         "openai-codex",
@@ -29,10 +30,10 @@ final class ProviderManagementTests: XCTestCase {
 
     // MARK: - Registry 1.2.0 and locked provider set
 
-    func testLockedProviderIDsAreExactlyTheSixteenLockedEntries() {
+    func testLockedProviderIDsAreExactlyTheSeventeenLockedEntries() {
         let ids = ProviderCatalog.lockedProviderIds
-        XCTAssertEqual(ids.count, 16)
-        XCTAssertEqual(Set(ids).count, 16, "provider ids must be unique")
+        XCTAssertEqual(ids.count, 17)
+        XCTAssertEqual(Set(ids).count, 17, "provider ids must be unique")
         XCTAssertEqual(ids, ids.sorted(), "provider ids must be stable and sorted")
         XCTAssertEqual(ids, Self.lockedIDs)
     }
@@ -42,7 +43,7 @@ final class ProviderManagementTests: XCTestCase {
 
         XCTAssertEqual(decoded.schemaVersion, "1.2.0")
         XCTAssertEqual(decoded.syncedFromSha, Self.pinnedOMPSHA)
-        XCTAssertEqual(decoded.providers.count, 16)
+        XCTAssertEqual(decoded.providers.count, 17)
         XCTAssertEqual(decoded.providers.map(\.id), Self.lockedIDs)
         XCTAssertEqual(decoded, ProviderCatalog.locked)
         for provider in decoded.providers {
@@ -80,7 +81,7 @@ final class ProviderManagementTests: XCTestCase {
 
     func testLockedCatalogPreservesDisplayNameMap() {
         let catalog = ProviderCatalog.locked
-        XCTAssertEqual(catalog.providers.count, 16)
+        XCTAssertEqual(catalog.providers.count, 17)
         XCTAssertEqual(Set(catalog.providers.map(\.id)), Set(Self.lockedIDs))
         for provider in catalog.providers {
             XCTAssertFalse(provider.displayName.isEmpty)

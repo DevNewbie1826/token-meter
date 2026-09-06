@@ -134,12 +134,16 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
         let qaHarnessRequested = environment["TOKEN_METER_QA_FIXTURE"] == "1"
             || environment["TOKEN_METER_QA_OPEN_SETTINGS"] == "1"
         if environment["TOKEN_METER_QA_OPEN_SETTINGS"] == "1" {
+            let fixtureBridge = NekosQAHost.bridge(environment: environment)
             let model = TokenMeterViewModel(
+                bridge: fixtureBridge,
                 providerManagementStore: TokenMeterApp.qaProviderManagementStore(scope: "settings")
             )
             let showsLiveUsage = environment["TOKEN_METER_QA_LIVE_USAGE"] == "1"
             let hostedRoot: AnyView
-            if showsLiveUsage {
+            if fixtureBridge != nil {
+                hostedRoot = AnyView(NekosQAHost(model: model))
+            } else if showsLiveUsage {
                 hostedRoot = AnyView(KimiLiveAcceptanceHostView(model: model))
             } else {
                 hostedRoot = AnyView(ProviderManagementView(model: model))
@@ -151,7 +155,7 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
                 contentRect: NSRect(
                     x: 0,
                     y: 0,
-                    width: showsLiveUsage ? 1_080 : 640,
+                    width: showsLiveUsage || fixtureBridge != nil ? 1_080 : 640,
                     height: 760
                 ),
                 styleMask: [.titled, .closable, .resizable],
@@ -186,6 +190,8 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
                 object: nil,
                 queue: .main
             ) { [weak self] notification in
+                if let target = notification.userInfo?["targetPID"] as? NSNumber,
+                   target.int32Value != ProcessInfo.processInfo.processIdentifier { return }
                 guard
                     let window = self?.qaProviderWindow,
                     let contentView = window.contentView,
@@ -214,6 +220,7 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if qaHarnessRequested {
+            NekosQAHost.announceReady(environment: environment)
             FileHandle.standardOutput.write(Data("TOKEN_METER_QA_READY\n".utf8))
         }
     }
