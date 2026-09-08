@@ -12,6 +12,7 @@ import type { BridgeCredential, OAuthCredential } from "../protocol-core";
 import type { AuthPrompt } from "./types";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
+import { CallbackCancelledError } from "./loopback";
 
 export async function rotateOAuthToken(input: {
   credential: OAuthCredential;
@@ -149,18 +150,31 @@ export function parseManualCallbackInput(input: string): { code?: string; state?
  * duplex channel: the loopback callback and a requestInput paste prompt race;
  * an invalid paste (no code, missing state, or mismatched state)
  * re-prompts. Without a requestInput channel the wait is the plain callback.
+ * Omit wait for manual-only providers: input is required, channel failures
+ * propagate, and cancellation does not depend on a loopback listener.
  */
 export async function waitForCallbackOrManualPaste(input: {
-  readonly wait: Promise<ManualCallbackResult>;
+  readonly wait?: Promise<ManualCallbackResult>;
   readonly expectedState: string;
   readonly requestInput?: ManualInputRequest | undefined;
   readonly prompt: AuthPrompt;
   readonly signal: AbortSignal;
 }): Promise<ManualCallbackResult> {
-  const { wait, expectedState, requestInput, prompt, signal } = input;
-  if (requestInput === undefined) {
-    return await wait;
+  const { expectedState, requestInput, prompt, signal } = input;
+  const manualOnly = input.wait === undefined;
+  if (manualOnly && signal.aborted) {
+    throw new CallbackCancelledError("manual callback cancelled");
   }
+  if (requestInput === undefined) {
+    if (input.wait === undefined) {
+      throw new BridgeError("invalidRequest", "manual callback requires an input channel");
+    }
+    return await input.wait;
+  }
+  const cancelled = Promise.withResolvers<ManualCallbackResult>();
+  const onAbort = (): void => cancelled.reject(new CallbackCancelledError("manual callback cancelled"));
+  const wait = input.wait ?? cancelled.promise;
+  if (manualOnly) signal.addEventListener("abort", onAbort, { once: true });
   // Set once the loopback wait settles, so the re-prompt loop stops issuing
   // new prompts after the callback already resolved the login.
   let callbackSettled = false;
@@ -180,11 +194,13 @@ export async function waitForCallbackOrManualPaste(input: {
       let pasted: string;
       try {
         pasted = await requestInput(prompt, signal);
-      } catch {
+      } catch (error) {
+        if (manualOnly) throw error;
         // The duplex input channel failed; the loopback callback is the only
         // remaining path, so settle on its outcome (it rejects on abort).
         return await wait;
       }
+      if (manualOnly && signal.aborted) throw new CallbackCancelledError("manual callback cancelled");
       const parsed = parseManualCallbackInput(pasted);
       const parsedState = parsed.state;
       const stateMatches = parsedState === expectedState;
@@ -198,5 +214,9 @@ export async function waitForCallbackOrManualPaste(input: {
       // Invalid paste: re-prompt (OMP loop).
     }
   };
-  return await Promise.race([settledWait, manualPaste()]);
+  try {
+    return await Promise.race([settledWait, manualPaste()]);
+  } finally {
+    if (manualOnly) signal.removeEventListener("abort", onAbort);
+  }
 }

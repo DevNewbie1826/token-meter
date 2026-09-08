@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import summaryFixture from "../fixtures/antigravity-summary.json";
+import remainingFixture from "../fixtures/antigravity-remaining.json";
 import {
   fetchAntigravityUsage,
   googleAntigravityAuth,
@@ -34,6 +36,9 @@ const SANDBOX_USAGE_URL = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1i
 const LOAD_DAILY_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const LOAD_CLOUDCODE_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const ONBOARD_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser";
+const SUMMARY_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const SUMMARY_SANDBOX_URL = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const OPERATION_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal/operations/onboard-unit";
 
 const SCOPES = [
   "https://www.googleapis.com/auth/cloud-platform",
@@ -181,7 +186,7 @@ const EXPECTED_WINDOWS: readonly UsageWindow[] = [
     label: "Usage (Anthropic)",
     unit: "percent",
     resolvedFraction: 0.875,
-    severity: "ok",
+    severity: "warning",
     used: 87.5,
     limit: 100,
     resetsAtMs: DAILY_RESET_MS,
@@ -214,12 +219,12 @@ const EXPECTED_WINDOWS: readonly UsageWindow[] = [
 
 describe("googleAntigravityConnector — quota mapping", () => {
   test("maps the OMP fetchAvailableModels payload to normalized windows over the exact upstream call", async () => {
-    const fetcher = mockFetcher({ [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 }, [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
     const request = antigravityUsageRequest();
     const response = await googleAntigravityConnector.fetchUsage({ request, fetcher, nowMs: NOW_MS });
 
-    expect(fetcher.calls.length).toBe(1);
-    const usageCall = fetcher.calls[0];
+    expect(fetcher.calls.length).toBe(2);
+    const usageCall = fetcher.calls[1];
     if (usageCall === undefined) {
       throw new Error("expected the usage endpoint to be called");
     }
@@ -250,7 +255,7 @@ describe("googleAntigravityConnector — quota mapping", () => {
   });
 
   test("falls back to the sandbox endpoint on a transient daily failure", async () => {
-    const fetcher = mockFetcher({
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 },
       [`POST ${USAGE_URL}`]: { status: 503, body: { error: "backend unavailable" } },
       [`POST ${SANDBOX_USAGE_URL}`]: { status: 200, body: USAGE_BODY },
     });
@@ -259,14 +264,12 @@ describe("googleAntigravityConnector — quota mapping", () => {
       fetcher,
       nowMs: NOW_MS,
     });
-    expect(fetcher.calls.length).toBe(2);
-    expect(fetcher.calls[0]?.url).toBe(USAGE_URL);
-    expect(fetcher.calls[1]?.url).toBe(SANDBOX_USAGE_URL);
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, USAGE_URL, SANDBOX_USAGE_URL]);
     expect(response.report.windows).toEqual(EXPECTED_WINDOWS);
   });
 
   test("keeps the credential out of the serialized response", async () => {
-    const fetcher = mockFetcher({ [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 }, [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
     const response = await googleAntigravityConnector.fetchUsage({
       request: antigravityUsageRequest(),
       fetcher,
@@ -283,7 +286,7 @@ describe("googleAntigravityConnector — quota mapping", () => {
 
 describe("googleAntigravityConnector — OAuth rotation", () => {
   test("pre-rotates an expiring token and returns refreshedCredential", async () => {
-    const fetcher = mockFetcher({
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 },
       [`POST ${TOKEN_URL}`]: {
         status: 200,
         body: { access_token: "ag-access-rotated", refresh_token: "ag-refresh-rotated", expires_in: 3600 },
@@ -295,7 +298,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
     const response = await googleAntigravityConnector.fetchUsage({ request, fetcher, nowMs: NOW_MS });
 
     // Rotation happens before the usage call, at the pinned token endpoint.
-    expect(fetcher.calls.length).toBe(2);
+    expect(fetcher.calls.length).toBe(3);
     const rotateCall = fetcher.calls[0];
     if (rotateCall === undefined) {
       throw new Error("expected a rotation call");
@@ -309,7 +312,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
     expect(params.get("client_secret")).toBe(CLIENT_SECRET);
     expect(params.get("refresh_token")).toBe(REFRESH);
 
-    const usageCall = fetcher.calls[1];
+    const usageCall = fetcher.calls[2];
     if (usageCall === undefined) {
       throw new Error("expected the usage call");
     }
@@ -333,7 +336,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
   });
 
   test("rotates once after a mid-flow 401 and retries successfully", async () => {
-    const fetcher = queuedFetcher({
+    const fetcher = queuedFetcher({ [`POST ${SUMMARY_URL}`]: [{ status: 404 }, { status: 404 }],
       [`POST ${USAGE_URL}`]: [
         { status: 401, body: { error: "invalid_token" } },
         { status: 200, body: USAGE_BODY },
@@ -348,11 +351,8 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
       nowMs: NOW_MS,
     });
 
-    expect(fetcher.calls.length).toBe(3);
-    expect(fetcher.calls[0]?.url).toBe(USAGE_URL);
-    expect(fetcher.calls[1]?.url).toBe(TOKEN_URL);
-    expect(fetcher.calls[2]?.url).toBe(USAGE_URL);
-    expect(new Headers(fetcher.calls[2]?.init.headers).get("Authorization")).toBe("Bearer ag-access-rotated");
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, USAGE_URL, TOKEN_URL, SUMMARY_URL, USAGE_URL]);
+    expect(new Headers(fetcher.calls[4]?.init.headers).get("Authorization")).toBe("Bearer ag-access-rotated");
     // Response rotation kept the prior refresh token (OMP behavior).
     expect(response.refreshedCredential).toMatchObject({
       kind: "oauth",
@@ -378,7 +378,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
   });
 
   test("keeps the pre-rotated credential on the error envelope when the usage call fails afterwards", async () => {
-    const fetcher = queuedFetcher({
+    const fetcher = queuedFetcher({ [`POST ${SUMMARY_URL}`]: [{ status: 404 }, { status: 404 }],
       [`POST ${TOKEN_URL}`]: [
         { status: 200, body: { access_token: "ag-access-rotated", refresh_token: "ag-refresh-rotated", expires_in: 3600 } },
       ],
@@ -395,7 +395,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
     expect(error.kind).toBe("rateLimited");
     expect(error.retryAfterMs).toBe(11_000);
     // The daily endpoint's 429 falls back to sandbox; the second 429 is final.
-    expect(fetcher.calls.map((call) => call.url)).toEqual([TOKEN_URL, USAGE_URL, SANDBOX_USAGE_URL]);
+    expect(fetcher.calls.map((call) => call.url)).toEqual([TOKEN_URL, SUMMARY_URL, USAGE_URL, SANDBOX_USAGE_URL]);
     // The rotated bundle rides the error so the caller persists it before
     // surfacing the failure — Google rotation burns the old refresh token.
     expect(error.refreshedCredential?.kind).toBe("oauth");
@@ -410,7 +410,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
   });
 
   test("keeps the mid-flow-rotated credential on the error envelope when the retried usage call 401s again", async () => {
-    const fetcher = queuedFetcher({
+    const fetcher = queuedFetcher({ [`POST ${SUMMARY_URL}`]: [{ status: 404 }, { status: 404 }],
       [`POST ${USAGE_URL}`]: [
         { status: 401, body: { error: "invalid_token" } },
         { status: 401, body: { error: "invalid_token" } },
@@ -421,7 +421,7 @@ describe("googleAntigravityConnector — OAuth rotation", () => {
       googleAntigravityConnector.fetchUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }),
     );
     expect(error.kind).toBe("authRequired");
-    expect(fetcher.calls.length).toBe(3);
+    expect(fetcher.calls.length).toBe(5);
     expect(error.refreshedCredential?.kind).toBe("oauth");
     if (error.refreshedCredential?.kind !== "oauth") {
       throw new Error("expected the rotated credential on the error envelope");
@@ -467,7 +467,7 @@ describe("googleAntigravityConnector — typed error paths", () => {
   });
 
   test("maps a 401 to authRequired without the sandbox fallback", async () => {
-    const fetcher = mockFetcher({ [`POST ${USAGE_URL}`]: { status: 401, body: { error: "unauthorized" } } });
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 }, [`POST ${USAGE_URL}`]: { status: 401, body: { error: "unauthorized" } } });
     const error = await bridgeErrorFrom(() =>
       googleAntigravityConnector.fetchUsage({
         // No refresh token: the 401 is final (no rotation retry, no sandbox).
@@ -477,12 +477,12 @@ describe("googleAntigravityConnector — typed error paths", () => {
       }),
     );
     expect(error.kind).toBe("authRequired");
-    expect(fetcher.calls.length).toBe(1);
+    expect(fetcher.calls.length).toBe(2);
     expect(error.message).not.toContain(ACCESS);
   });
 
   test("maps 429 with Retry-After on both endpoints to rateLimited with retryAfterMs", async () => {
-    const fetcher = mockFetcher({
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 },
       [`POST ${USAGE_URL}`]: { status: 429, headers: { "retry-after": "30" }, body: { error: "rate limited" } },
       [`POST ${SANDBOX_USAGE_URL}`]: { status: 429, headers: { "retry-after": "30" }, body: { error: "rate limited" } },
     });
@@ -491,7 +491,7 @@ describe("googleAntigravityConnector — typed error paths", () => {
     );
     expect(error.kind).toBe("rateLimited");
     expect(error.retryAfterMs).toBe(30000);
-    expect(fetcher.calls.length).toBe(2);
+    expect(fetcher.calls.length).toBe(3);
   });
 
   test("maps a non-JSON body to malformedPayload", async () => {
@@ -503,7 +503,7 @@ describe("googleAntigravityConnector — typed error paths", () => {
   });
 
   test("maps an empty models map to noData (no-usable-rows rule)", async () => {
-    const fetcher = mockFetcher({ [`POST ${USAGE_URL}`]: { status: 200, body: { models: {} } } });
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 }, [`POST ${USAGE_URL}`]: { status: 200, body: { models: {} } } });
     const error = await bridgeErrorFrom(() =>
       googleAntigravityConnector.fetchUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }),
     );
@@ -634,7 +634,7 @@ async function withPinnedAntigravityEnv<T>(fn: () => Promise<T>): Promise<T> {
  * module stops the callback server in its finally, closing live sockets).
  */
 async function runBrowserFlow(
-  routes: Parameters<typeof mockFetcher>[0],
+  routes: Parameters<typeof mockFetcher>[0] | QueuedFetcher,
 ): Promise<{
   readonly result: Awaited<ReturnType<typeof loginAntigravity>>;
   readonly fetcher: ReturnType<typeof mockFetcher>;
@@ -643,7 +643,7 @@ async function runBrowserFlow(
   readonly authorizeUrl: URL;
   readonly redirectUri: string;
 }> {
-  const innerFetcher = mockFetcher(routes);
+  const innerFetcher = typeof routes === "function" ? routes : mockFetcher(routes);
   const callbackDrained = Promise.withResolvers<void>();
   const fetcher = (url: string, init: RequestInit): Promise<Response> =>
     callbackDrained.promise.then(() => innerFetcher(url, init));
@@ -692,7 +692,7 @@ describe("googleAntigravityAuth — browser method (existing project)", () => {
       [`GET ${USERINFO_URL}`]: { status: 200, body: { email: USER_EMAIL } },
       [`POST ${LOAD_DAILY_URL}`]: {
         status: 200,
-        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" } },
+        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" }, paidTier: {} },
       },
     });
 
@@ -757,7 +757,7 @@ describe("googleAntigravityAuth — browser method (existing project)", () => {
     expect(loadHeaders.get("Content-Type")).toBe("application/json");
     expect(loadHeaders.get("User-Agent")).toBe(ANTIGRAVITY_UA);
     expect(JSON.parse(String(loadCall.init.body))).toEqual({ metadata: { ideType: "ANTIGRAVITY" } });
-    expect(fetcher.calls.length).toBe(3);
+    expect(fetcher.calls.length).toBe(4);
 
     // Credential: OAuth bundle with the project id stored in identity.
     expect(result.credential).toEqual({
@@ -784,7 +784,7 @@ describe("googleAntigravityAuth — browser method (existing project)", () => {
     const { result } = await runBrowserFlow({
       [`POST ${TOKEN_URL}`]: { status: 200, body: TOKEN_BODY },
       [`GET ${USERINFO_URL}`]: { status: 403, body: { error: "forbidden" } },
-      [`POST ${LOAD_DAILY_URL}`]: { status: 200, body: { cloudaicompanionProject: "proj-string-form" } },
+      [`POST ${LOAD_DAILY_URL}`]: { status: 200, body: { cloudaicompanionProject: "proj-string-form", currentTier: {}, paidTier: {} } },
     });
     expect(result.credential.kind).toBe("oauth");
     if (result.credential.kind === "oauth") {
@@ -796,45 +796,26 @@ describe("googleAntigravityAuth — browser method (existing project)", () => {
 
 describe("googleAntigravityAuth — browser method (provisioning)", () => {
   test("provisions a project through onboardUser with the exact OMP request", async () => {
-    const { result, fetcher } = await runBrowserFlow({
-      [`POST ${TOKEN_URL}`]: { status: 200, body: TOKEN_BODY },
-      [`GET ${USERINFO_URL}`]: { status: 200, body: { email: USER_EMAIL } },
-      // Daily endpoint loads fine but has no project.
-      [`POST ${LOAD_DAILY_URL}`]: { status: 200, body: {} },
-      // Stable endpoint also loads without a project; the LAST loaded
-      // payload supplies the default tier id (OMP overwrites the fallback
-      // tier on every successful load).
-      [`POST ${LOAD_CLOUDCODE_URL}`]: {
-        status: 200,
-        body: {
-          currentTier: { id: "tier-individual-legacy" },
-          allowedTiers: [{ id: "free-tier" }, { id: "tier-individual", isDefault: true }],
-        },
-      },
-      [`POST ${ONBOARD_URL}`]: {
-        status: 200,
-        body: { done: true, response: { cloudaicompanionProject: "proj-provisioned-9" } },
-      },
-    });
+    const { result, fetcher } = await runBrowserFlow(queuedFetcher({
+      [`POST ${TOKEN_URL}`]: [{ status: 200, body: TOKEN_BODY }],
+      [`GET ${USERINFO_URL}`]: [{ status: 200, body: { email: USER_EMAIL } }],
+      [`POST ${LOAD_DAILY_URL}`]: [
+        { status: 200, body: { allowedTiers: [{ id: "free-tier" }] } },
+        { status: 200, body: { currentTier: {}, paidTier: {}, cloudaicompanionProject: "proj-provisioned-9" } },
+      ],
+      [`POST ${ONBOARD_URL}`]: [{ status: 200, body: { done: true, response: { "@type": "type.googleapis.com/google.internal.cloud.code.v1internal.OnboardUserResponse" } } }],
+    }));
 
-    // Discovery ran on both endpoints before onboarding.
     expect(fetcher.calls[2]?.url).toBe(LOAD_DAILY_URL);
-    expect(fetcher.calls[3]?.url).toBe(LOAD_CLOUDCODE_URL);
-
-    const onboardCall = fetcher.calls[4];
-    if (onboardCall === undefined) {
-      throw new Error("expected an onboardUser call");
-    }
+    expect(fetcher.calls[4]?.url).toBe(LOAD_DAILY_URL);
+    const onboardCall = fetcher.calls[3];
+    if (onboardCall === undefined) throw new Error("expected an onboardUser call");
     expect(onboardCall.method).toBe("POST");
     expect(onboardCall.url).toBe(ONBOARD_URL);
     const headers = new Headers(onboardCall.init.headers);
     expect(headers.get("Authorization")).toBe(`Bearer ${LOGIN_ACCESS}`);
-    expect(headers.get("User-Agent")).toBe(`${ANTIGRAVITY_UA} google-api-nodejs-client/10.3.0`);
-    expect(headers.get("X-Goog-Api-Client")).toBe("gl-node/22.21.1");
-    expect(JSON.parse(String(onboardCall.init.body))).toEqual({
-      tier_id: "tier-individual",
-      metadata: { ide_type: "ANTIGRAVITY", ide_version: "2.8.0", ide_name: "antigravity" },
-    });
+    expect(headers.get("User-Agent")).toBe(ANTIGRAVITY_UA);
+    expect(JSON.parse(String(onboardCall.init.body))).toEqual({ tierId: "free-tier", metadata: { ideType: "ANTIGRAVITY" } });
     expect(fetcher.calls.length).toBe(5);
 
     expect(result.credential).toMatchObject({
@@ -948,7 +929,7 @@ describe("googleAntigravityAuth — module surface", () => {
   });
 
   test("exports a working fetchUsage bound to the connector", async () => {
-    const fetcher = mockFetcher({ [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 404 }, [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
     const response = await fetchAntigravityUsage({
       request: antigravityUsageRequest(),
       fetcher,
@@ -1027,7 +1008,7 @@ describe("googleAntigravityAuth — manual paste fallback (OMP onManualCodeInput
       [`GET ${USERINFO_URL}`]: { status: 200, body: { email: USER_EMAIL } },
       [`POST ${LOAD_DAILY_URL}`]: {
         status: 200,
-        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" } },
+        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" }, paidTier: {} },
       },
     });
     const collector = eventCollector();
@@ -1064,7 +1045,7 @@ describe("googleAntigravityAuth — manual paste fallback (OMP onManualCodeInput
       [`GET ${USERINFO_URL}`]: { status: 200, body: { email: USER_EMAIL } },
       [`POST ${LOAD_DAILY_URL}`]: {
         status: 200,
-        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" } },
+        body: { cloudaicompanionProject: { id: "proj-existing-77" }, currentTier: { id: "tier-individual" }, paidTier: {} },
       },
     });
     const collector = eventCollector();
@@ -1131,5 +1112,373 @@ describe("googleAntigravityAuth — manual paste fallback (OMP onManualCodeInput
     expect(error.kind).toBe("timeout");
     expect(error.message).toContain("cancel");
     await expectLoopbackClosed(redirectUri);
+  });
+});
+
+describe("Antigravity current summary contract", () => {
+  test("prefers grouped summary and keeps shared third-party buckets once", async () => {
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 200, body: summaryFixture } });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL]);
+    expect(JSON.parse(String(fetcher.calls[0]?.init.body))).toEqual({ project: "proj-unit-1" });
+    expect(new Headers(fetcher.calls[0]?.init.headers).get("Authorization")).toBe(`Bearer ${ACCESS}`);
+    expect(response.report.windows).toHaveLength(4);
+    expect(response.report.windows.map(w => w.resolvedFraction)).toEqual([0.95, 0.875, 0.8, 0]);
+    expect(response.report.windows.map(w => w.severity)).toEqual(["critical", "warning", "warning", "ok"]);
+    expect(response.report.windows.filter(w => w.id.includes("3p-"))).toHaveLength(2);
+    expect(new Set(response.report.windows.map(w => w.id)).size).toBe(4);
+    expectNoModelFields(response);
+  });
+
+  test("preserves remaining-only amounts including zero without percentage or denominator", async () => {
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 200, body: remainingFixture } });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(w => w.remaining)).toEqual([42.5, 0]);
+    for (const window of response.report.windows) {
+      expect(window.unit).toBe("unknown");
+      expect(window.severity).toBe("unknown");
+      expect(window.used).toBeUndefined();
+      expect(window.limit).toBeUndefined();
+      expect(window.resolvedFraction).toBeUndefined();
+    }
+  });
+
+  for (const body of [{}, { buckets: [] }, { groups: [{ buckets: [] }] }]) {
+    test(`empty summary falls back: ${JSON.stringify(body)}`, async () => {
+      const fetcher = mockFetcher({
+        [`POST ${SUMMARY_URL}`]: { status: 200, body },
+        [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY },
+      });
+      const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+      expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, USAGE_URL]);
+      expect(response.report.windows).toHaveLength(5);
+    });
+  }
+  test("unavailable summary falls back to legacy without inventing unmetered sibling quota", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 404 },
+      [`POST ${USAGE_URL}`]: { status: 200, body: { models: {
+        autocomplete: { modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfo: { remainingFraction: 1 } },
+        metered: { modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfo: { resetTime: WEEKLY_RESET_ISO } },
+        independent: { modelProvider: "MODEL_PROVIDER_ANTHROPIC", quotaInfo: { remainingFraction: 0.125 } },
+      } } },
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, USAGE_URL]);
+    expect(response.report.windows.map(w => w.resolvedFraction)).toEqual([1, 0.875]);
+    expect(response.report.windows.map(w => w.severity)).toEqual(["exhausted", "warning"]);
+  });
+  test("transient summary probes sandbox before legacy", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 503 },
+      [`POST ${SUMMARY_SANDBOX_URL}`]: { status: 503 },
+      [`POST ${USAGE_URL}`]: { status: 200, body: USAGE_BODY },
+    });
+    await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, SUMMARY_SANDBOX_URL, USAGE_URL]);
+  });
+  test("summary sandbox success never reaches legacy", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 503 },
+      [`POST ${SUMMARY_SANDBOX_URL}`]: { status: 200, body: remainingFixture },
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows[0]?.remaining).toBe(42.5);
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, SUMMARY_SANDBOX_URL]);
+  });
+  for (const [status, kind] of [[401, "authRequired"], [403, "permissionDenied"]] as const) {
+    test(`summary ${status} is terminal without fallback`, async () => {
+      const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status } });
+      const error = await bridgeErrorFrom(() => fetchAntigravityUsage({
+        request: antigravityUsageRequest({ credential: oauthCredential({ dropRefresh: true }) }), fetcher, nowMs: NOW_MS,
+      }));
+      expect(error.kind).toBe(kind);
+      expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL]);
+    });
+  }
+  test("disabled summary is authoritative noData, not fallback", async () => {
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: {
+      status: 200, body: { buckets: [{ bucketId: "disabled", disabled: true, remainingFraction: 0 }] },
+    } });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL]);
+  });
+  for (const body of [null, [], { buckets: "bad" }, { groups: [null] }, { buckets: [null] },
+    { buckets: [{ remainingFraction: "0.2" }] }, { buckets: [{ remainingAmount: -1 }] },
+    { buckets: [{ remainingAmount: "" }] }, { buckets: [{ remainingAmount: "NaN" }] },
+    { buckets: [{ disabled: "true" }] }]) {
+    test(`malformed summary is typed and never silently replaced: ${JSON.stringify(body)}`, async () => {
+      const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 200, body } });
+      const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+      expect(error.kind).toBe("malformedPayload");
+      expect(fetcher.calls).toHaveLength(1);
+    });
+  }
+  test("empty quota records and invalid reset strings do not fabricate legacy exhaustion", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: {} },
+      [`POST ${USAGE_URL}`]: { status: 200, body: { models: { a: { quotaInfos: [{}, { resetTime: "bad" }] } } } },
+    });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
+  });
+});
+
+// Scripted control-plane requests are exact gates, not timers. Browser callback is
+// satisfied through the real correlated manual-input path; finally reaps listener.
+async function currentControlPlane(
+  script: readonly { readonly url: string; readonly method?: string; readonly body: unknown; readonly status?: number;
+    readonly elapsedMs?: number; readonly interruptBody?: "timeout" | "cancel" }[],
+  options: { readonly cancelAtSleep?: boolean; readonly advanceBy?: number } = {},
+): Promise<{ readonly result?: Awaited<ReturnType<typeof loginAntigravity>>; readonly error?: BridgeError;
+  readonly calls: RecordedCall[]; readonly waits: number[]; readonly timeouts: number[] }> {
+  const calls: RecordedCall[] = [];
+  const waits: number[] = [];
+  const timeouts: number[] = [];
+  const timeoutControllers: AbortController[] = [];
+  let clock = NOW_MS;
+  let redirect = "";
+  let state = "";
+  const controller = new AbortController();
+  const queue = [...script];
+  const fetcher = async (url: string, init: RequestInit): Promise<Response> => {
+    if (url === TOKEN_URL) return Response.json(TOKEN_BODY);
+    if (url === USERINFO_URL) return Response.json({ email: USER_EMAIL });
+    calls.push({ method: init.method ?? "GET", url, init });
+    const next = queue.shift();
+    if (next === undefined) throw new Error("unexpected control-plane request");
+    expect(url).toBe(next.url);
+    expect(init.method).toBe(next.method ?? "POST");
+    clock += next.elapsedMs ?? 0;
+    if (next.interruptBody !== undefined) {
+      const signal = init.signal;
+      if (!signal) throw new Error("request missing cancellation signal");
+      const timeoutController = timeoutControllers.at(-1);
+      if (!timeoutController) throw new Error("request missing deadline signal");
+      const stream = new ReadableStream<Uint8Array>({ start(streamController) {
+        signal.addEventListener("abort", () => streamController.error(signal.reason), { once: true });
+        if (next.interruptBody === "cancel") controller.abort(new DOMException("cancelled", "AbortError"));
+        else timeoutController.abort(new DOMException("deadline", "TimeoutError"));
+      } });
+      return new Response(stream);
+    }
+    return Response.json(next.body, { status: next.status ?? 200 });
+  };
+  try {
+    const result = await loginAntigravity("browser", {}, {
+      onEvent(event) {
+        if (event.type === "openUrl") {
+          const url = new URL(event.url);
+          redirect = url.searchParams.get("redirect_uri") ?? "";
+          state = url.searchParams.get("state") ?? "";
+        }
+      },
+      requestInput: async () => `${redirect}?code=${AUTH_CODE}&state=${state}`,
+    }, controller.signal, {
+      fetcher, now: () => clock,
+      timeoutSignal: (ms) => {
+        timeouts.push(ms);
+        const deadline = new AbortController();
+        timeoutControllers.push(deadline);
+        return deadline.signal;
+      },
+      sleep: async (ms) => {
+        waits.push(ms);
+        clock += options.advanceBy ?? ms;
+        if (options.cancelAtSleep) controller.abort();
+      },
+    });
+    return { result, calls, waits, timeouts };
+  } catch (error) {
+    if (!(error instanceof BridgeError)) throw error;
+    return { error, calls, waits, timeouts };
+  } finally {
+    controller.abort();
+    if (redirect) await expectLoopbackClosed(redirect);
+  }
+}
+
+const CURRENT_PROJECT = { currentTier: { id: "free-tier" }, paidTier: { id: "paid" }, cloudaicompanionProject: "refreshed-project" };
+const PENDING_OPERATION = { name: "operations/onboard-unit", done: false };
+const DONE_OPERATION = { name: "operations/onboard-unit", done: true,
+  response: { "@type": "type.googleapis.com/google.internal.cloud.code.v1internal.OnboardUserResponse", cloudaicompanionProject: "stale-operation-project" } };
+
+describe("Antigravity current control plane", () => {
+  test("hydrates project without paidTier then returns refreshed discovery", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: { currentTier: {}, cloudaicompanionProject: "initial-project" } },
+      { url: LOAD_DAILY_URL, body: { ...CURRENT_PROJECT, cloudaicompanionProject: "hydrated-project" } },
+      { url: LOAD_DAILY_URL, body: CURRENT_PROJECT },
+    ]);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.result?.credential).toMatchObject({ oauth: { identity: { projectId: "refreshed-project" } } });
+    expect(outcome.calls).toHaveLength(3);
+    expect(JSON.parse(String(outcome.calls[1]?.init.body))).toEqual({ cloudaicompanionProject: "initial-project", metadata: { ideType: "ANTIGRAVITY" } });
+  });
+  test("posts native free-tier onboarding once then polls GET and refreshes project", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: { allowedTiers: [{ id: "free-tier" }] } },
+      { url: ONBOARD_URL, body: PENDING_OPERATION },
+      { url: OPERATION_URL, method: "GET", body: DONE_OPERATION },
+      { url: LOAD_DAILY_URL, body: CURRENT_PROJECT },
+    ]);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.calls.map(c => c.method)).toEqual(["POST", "POST", "GET", "POST"]);
+    expect(JSON.parse(String(outcome.calls[1]?.init.body))).toEqual({ tierId: "free-tier", metadata: { ideType: "ANTIGRAVITY" } });
+    expect(outcome.calls[2]?.init.body).toBeUndefined();
+    expect(outcome.waits).toEqual([1000]);
+    expect(outcome.result?.credential).toMatchObject({ oauth: { identity: { projectId: "refreshed-project" } } });
+  });
+  test("failed named operation returns typed error without repeated POST or project refresh", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} }, { url: ONBOARD_URL, body: PENDING_OPERATION },
+      { url: OPERATION_URL, method: "GET", body: { done: true, error: { code: 7, message: LOGIN_ACCESS } } },
+    ]);
+    expect(outcome.error?.kind).toBe("upstreamError");
+    expect(outcome.error?.message).not.toContain(LOGIN_ACCESS);
+    expect(outcome.calls).toHaveLength(3);
+  });
+  test("onboarding has one 30s deadline, not an attempt count", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} }, { url: ONBOARD_URL, body: PENDING_OPERATION },
+    ], { advanceBy: 30_000 });
+    expect(outcome.error?.kind).toBe("timeout");
+    expect(outcome.calls.map(c => c.url)).toEqual([LOAD_DAILY_URL, ONBOARD_URL]);
+  });
+  test("user abort after exact pending-operation gate prevents GET", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} }, { url: ONBOARD_URL, body: PENDING_OPERATION },
+    ], { cancelAtSleep: true });
+    expect(outcome.error?.kind).toBe("timeout");
+    expect(outcome.calls.map(c => c.url)).toEqual([LOAD_DAILY_URL, ONBOARD_URL]);
+  });
+  test("free-tier ineligibility prevents onboarding even with an old project", async () => {
+    const outcome = await currentControlPlane([{ url: LOAD_DAILY_URL, body: {
+      ...CURRENT_PROJECT, allowedTiers: [], ineligibleTiers: [{ tierId: "free-tier", reasonMessage: "denied" }],
+    } }]);
+    expect(outcome.error?.kind).toBe("permissionDenied");
+    expect(outcome.calls).toHaveLength(1);
+  });
+  for (const body of [null, { currentTier: "bad" }, { allowedTiers: [null] }]) {
+    test(`malformed load response is typed: ${JSON.stringify(body)}`, async () => {
+      const outcome = await currentControlPlane([{ url: LOAD_DAILY_URL, body }]);
+      expect(outcome.error?.kind).toBe("malformedPayload");
+      expect(outcome.calls).toHaveLength(1);
+    });
+  }
+  for (const body of [{ done: true }, { done: true, response: {} }, { done: "yes" }, { done: false }]) {
+    test(`malformed operation is typed: ${JSON.stringify(body)}`, async () => {
+      const outcome = await currentControlPlane([{ url: LOAD_DAILY_URL, body: {} }, { url: ONBOARD_URL, body }]);
+      expect(outcome.error?.kind).toBe("malformedPayload");
+      expect(outcome.calls).toHaveLength(2);
+    });
+  }
+  test("native control plane rejects non-200 success statuses", async () => {
+    const outcome = await currentControlPlane([{ url: LOAD_DAILY_URL, status: 201, body: CURRENT_PROJECT }]);
+    expect(outcome.error?.kind).toBe("upstreamError");
+    expect(outcome.calls).toHaveLength(1);
+  });
+
+  test("POST and repeated GET response time consume one onboarding budget", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} },
+      { url: ONBOARD_URL, body: PENDING_OPERATION, elapsedMs: 5000 },
+      { url: OPERATION_URL, method: "GET", body: PENDING_OPERATION, elapsedMs: 3000 },
+      { url: OPERATION_URL, method: "GET", body: DONE_OPERATION },
+      { url: LOAD_DAILY_URL, body: CURRENT_PROJECT },
+    ]);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.timeouts).toEqual([30000, 30000, 24000, 20000, 30000]);
+    expect(outcome.waits).toEqual([1000, 1000]);
+  });
+  for (const interruptBody of ["timeout", "cancel"] as const) {
+    for (const path of [ONBOARD_URL, OPERATION_URL]) {
+      test(`${interruptBody} during ${path} response body stays typed and closes callback`, async () => {
+        const outcome = await currentControlPlane([
+          { url: LOAD_DAILY_URL, body: {} },
+          { url: ONBOARD_URL, body: PENDING_OPERATION, ...(path === ONBOARD_URL ? { interruptBody } : {}) },
+          ...(path === OPERATION_URL ? [{ url: OPERATION_URL, method: "GET", body: {}, interruptBody }] : []),
+        ]);
+        expect(outcome.error?.kind).toBe("timeout");
+        expect(outcome.calls.at(-1)?.url).toBe(path);
+        expect(outcome.result).toBeUndefined();
+      });
+    }
+  }
+  test("a late completed operation cannot bypass the 30s deadline", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} },
+      { url: ONBOARD_URL, body: DONE_OPERATION, elapsedMs: 30000 },
+    ]);
+    expect(outcome.error?.kind).toBe("timeout");
+    expect(outcome.calls).toHaveLength(2);
+  });
+  test("explicit free-tier allowance wins over ineligible-tier history", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: { ...CURRENT_PROJECT, allowedTiers: [{ id: "free-tier" }],
+        ineligibleTiers: [{ tierId: "free-tier", reasonMessage: "previous denial" }] } },
+      { url: LOAD_DAILY_URL, body: CURRENT_PROJECT },
+    ]);
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.calls).toHaveLength(2);
+  });
+  test("completed operation still requires a project from refreshed discovery", async () => {
+    const outcome = await currentControlPlane([
+      { url: LOAD_DAILY_URL, body: {} }, { url: ONBOARD_URL, body: DONE_OPERATION },
+      { url: LOAD_DAILY_URL, body: { currentTier: {}, paidTier: {} } },
+    ]);
+    expect(outcome.error?.kind).toBe("upstreamError");
+    expect(outcome.result).toBeUndefined();
+  });
+});
+
+describe("Antigravity summary adversarial controls", () => {
+  test("summary 401 rotates once and retries the summary rather than the catalog", async () => {
+    const fetcher = queuedFetcher({
+      [`POST ${SUMMARY_URL}`]: [{ status: 401 }, { status: 200, body: remainingFixture }],
+      [`POST ${TOKEN_URL}`]: [{ status: 200, body: { access_token: "ag-rotated", expires_in: 3600 } }],
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, TOKEN_URL, SUMMARY_URL]);
+    expect(new Headers(fetcher.calls[2]?.init.headers).get("Authorization")).toBe("Bearer ag-rotated");
+    expect(response.refreshedCredential).toMatchObject({ oauth: { access: "ag-rotated", refresh: REFRESH } });
+    expect(response.report.windows[0]?.remaining).toBe(42.5);
+  });
+  test("malformed summary after pre-rotation carries the rotated credential", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${TOKEN_URL}`]: { status: 200, body: { access_token: "ag-rotated", refresh_token: "ag-refresh-new", expires_in: 3600 } },
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: { buckets: [null] } },
+    });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest({
+      credential: oauthCredential({ expiresAtMs: NOW_MS + 1000 }),
+    }), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("malformedPayload");
+    expect(error.refreshedCredential).toMatchObject({ oauth: { access: "ag-rotated", refresh: "ag-refresh-new" } });
+  });
+  test("summary throttling remains typed with Retry-After and does not call legacy", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 429, headers: { "retry-after": "7" } },
+      [`POST ${SUMMARY_SANDBOX_URL}`]: { status: 429, headers: { "retry-after": "11" } },
+    });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("rateLimited");
+    expect(error.retryAfterMs).toBe(11000);
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, SUMMARY_SANDBOX_URL]);
+  });
+  test("fraction takes precedence over unrelated raw remaining amount", async () => {
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 200,
+      body: { buckets: [{ bucketId: "fraction", remainingFraction: 0.125, remainingAmount: "999" }] },
+    } });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows[0]).toMatchObject({ remaining: 12.5, remainingFraction: 0.125,
+      used: 87.5, limit: 100, resolvedFraction: 0.875, severity: "warning", unit: "percent" });
+  });
+  test("both empty sources produce noData without phantom rows", async () => {
+    const fetcher = mockFetcher({ [`POST ${SUMMARY_URL}`]: { status: 200, body: {} },
+      [`POST ${USAGE_URL}`]: { status: 200, body: { models: {} } } });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
+    expect(fetcher.calls).toHaveLength(2);
   });
 });

@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "data": { "limits": [
+    { "type": "TOKENS_LIMIT", "usage": 10000, "currentValue": 7999, "percentage": 80, "unit": 3, "number": 5 },
+    { "type": "TIME_LIMIT", "usage": 100, "currentValue": 101, "percentage": 100, "unit": 6 }
+  ] }
+}

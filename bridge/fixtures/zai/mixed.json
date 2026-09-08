@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "data": { "limits": [
+    { "type": "CREDIT_LIMIT", "usage": 10000, "currentValue": 8000, "percentage": 79, "unit": 3, "number": 5 },
+    { "type": "TOKENS_LIMIT", "usage": 10000, "currentValue": 7999, "percentage": 80, "unit": 3, "number": 5 },
+    { "type": "TIME_LIMIT", "usage": 10000, "currentValue": 9499, "percentage": 95, "unit": 3, "number": 5 },
+    { "type": "CREDIT_LIMIT", "usage": 60000, "currentValue": 59994, "percentage": 100, "unit": 6 }
+  ] }
+}
