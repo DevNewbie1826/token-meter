@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { loginXaiOauth, xaiOauthAuth, xaiOauthConnector } from "../src/providers/xai-oauth";
-import { BridgeError } from "../src/protocol";
+import { createXaiOauthConnector, loginXaiOauth, xaiOauthAuth, xaiOauthConnector } from "../src/providers/xai-oauth";
+import { BridgeError, fractionsConsistent } from "../src/protocol";
 import type { BridgeCredential, BridgeErrorKind, UsageWindow } from "../src/protocol";
 import type { AuthEvent } from "../src/dispatch";
 import type { Fetcher } from "../src/connectors/provider-http";
@@ -78,7 +78,7 @@ const WEEKLY_WINDOWS: readonly UsageWindow[] = [
     label: "DeepSearch (Weekly)",
     unit: "percent",
     resolvedFraction: 0.875,
-    severity: "ok",
+    severity: "warning",
     used: 87.5,
     limit: 100,
     resetsAtMs: WEEKLY_RESET_MS,
@@ -192,7 +192,145 @@ async function expectKind(action: () => Promise<unknown>, kind: BridgeErrorKind)
   throw new Error(`expected BridgeError ${kind}`);
 }
 
+describe("xAI exact amount ratios", () => {
+  const weekly = { currentPeriod: WEEKLY_PAYLOAD.config.currentPeriod, creditUsagePercent: 42, isUnifiedBillingUser: true };
+  const monthly = {
+    billingPeriodStart: MONTHLY_PAYLOAD.config.billingPeriodStart,
+    billingPeriodEnd: MONTHLY_PAYLOAD.config.billingPeriodEnd,
+    used: { val: 120 }, monthlyLimit: { val: 100 },
+  };
+  const onDemand = { onDemandUsed: { val: 120 }, onDemandCap: { val: 100 } };
+  // Both source amounts are finite; their ratio is not a valid wire number.
+  const monthlyOverflow = { ...monthly, used: { val: Number.MAX_VALUE }, monthlyLimit: { val: Number.MIN_VALUE } };
+  const onDemandOverflow = { onDemandUsed: { val: Number.MAX_VALUE }, onDemandCap: { val: Number.MIN_VALUE } };
+  for (const [scenario, creditsStatus, credits, monthlyStatus, included, expected] of [
+    ["monthly-at-cap", 500, {}, 200, { ...monthly, used: { val: 100 } }, [["included:1mo", 100]]],
+    ["monthly-overage", 500, {}, 200, monthly, [["included:1mo", 120]]],
+    ["optional-monthly-overage", 200, weekly, 200, monthly, [["credits:1w", 42], ["included:1mo", 120]]],
+    ["weekly-on-demand-overage", 200, { ...weekly, ...onDemand }, 500, {}, [["credits:1w", 42], ["on-demand", 120]]],
+    ["monthly-on-demand-overage", 500, {}, 200, { ...monthly, used: { val: 42 }, ...onDemand }, [["included:1mo", 42], ["on-demand", 120]]],
+    ["weekly-monthly-overflow", 200, weekly, 200, monthlyOverflow, [["credits:1w", 42]]],
+    ["weekly-on-demand-overflow", 200, { ...weekly, ...onDemandOverflow }, 500, {}, [["credits:1w", 42]]],
+    ["monthly-overflow-valid-on-demand", 500, {}, 200, { ...monthlyOverflow, ...onDemand, onDemandUsed: { val: 42 } }, [["on-demand", 42]]],
+    ["monthly-valid-on-demand-overflow", 500, {}, 200, { ...monthly, used: { val: 42 }, ...onDemandOverflow }, [["included:1mo", 42]]],
+    ["both-ratios-overflow", 200, {}, 200, { ...monthlyOverflow, ...onDemandOverflow }, []],
+  ] as const) {
+    test(`preserves exact finite ratios and valid siblings: ${scenario}`, async () => {
+      const fetcher = mockFetcher({
+        [`GET ${CREDITS_URL}`]: { status: creditsStatus, body: { config: credits } },
+        [`GET ${MONTHLY_URL}`]: { status: monthlyStatus, body: { config: included } },
+      });
+      const action = () => xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS });
+      if (expected.length === 0) {
+        await expectKind(action, "noData");
+      } else {
+        const result = await action();
+        expect(result.report.windows.map(({ id, used, limit, resolvedFraction, severity }) => ({
+          id, used, limit, resolvedFraction, severity,
+        }))).toEqual(expected.map(([suffix, used]) => ({
+          id: `xai-oauth:${suffix}`, used, limit: 100, resolvedFraction: used / 100,
+          severity: used >= 100 ? "exhausted" : "ok",
+        })));
+        for (const row of result.report.windows) {
+          expect(fractionsConsistent(row.resolvedFraction ?? NaN, row.used ?? NaN, row.limit ?? NaN)).toBe(true);
+        }
+        expect(JSON.stringify(result)).not.toContain(ACCESS);
+      }
+      expect(fetcher.calls.map(call => call.url)).toEqual([CREDITS_URL, MONTHLY_URL]);
+    });
+  }
+});
+
 describe("xaiOauthConnector", () => {
+  for (const [percent, severity] of [[80, "warning"], [87.5, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"]] as const) {
+    test(`uses wire severity for every quota kind at ${percent}%`, async () => {
+      const fetcher = mockFetcher({
+        [`GET ${CREDITS_URL}`]: { status: 200, body: { config: {
+          ...WEEKLY_PAYLOAD.config, creditUsagePercent: percent, isUnifiedBillingUser: true,
+          productUsage: [{ product: "GrokBuild", usagePercent: percent }], onDemandUsed: { val: percent },
+        } } },
+        [`GET ${MONTHLY_URL}`]: { status: 200, body: { config: {
+          ...MONTHLY_PAYLOAD.config, used: { val: percent }, monthlyLimit: { val: 100 },
+        } } },
+      });
+      const response = await xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS });
+      expect(response.report.windows).toHaveLength(4);
+      expect(response.report.windows.map(window => window.severity)).toEqual(Array(4).fill(severity));
+    });
+  }
+
+  for (const failure of ["500", "transport", "malformed", "timeout"] as const) {
+    for (const failedEndpoint of ["credits", "monthly"] as const) {
+      test(`keeps useful quota after ${failedEndpoint} ${failure}`, async () => {
+        const calls: string[] = [];
+        const fetcher: Fetcher = async url => {
+          calls.push(url);
+          if (url === (failedEndpoint === "credits" ? CREDITS_URL : MONTHLY_URL)) {
+            if (failure === "transport") throw new TypeError("synthetic network failure");
+            if (failure === "timeout") throw new DOMException("synthetic endpoint timeout", "TimeoutError");
+            return failure === "malformed" ? new Response("not JSON") : Response.json({}, { status: 500 });
+          }
+          return Response.json(url === CREDITS_URL
+            ? { config: { ...WEEKLY_PAYLOAD.config, isUnifiedBillingUser: true } } : MONTHLY_PAYLOAD);
+        };
+        const result = await xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS });
+        expect(result.report.windows).toEqual(failedEndpoint === "credits" ? MONTHLY_WINDOWS : WEEKLY_WINDOWS);
+        expect(calls).toEqual([CREDITS_URL, MONTHLY_URL]);
+      });
+    }
+  }
+
+  for (const [status, kind] of [[401, "authRequired"], [403, "permissionDenied"], [429, "rateLimited"]] as const) {
+    for (const failedEndpoint of [CREDITS_URL, MONTHLY_URL]) {
+      test(`does not recover billing ${status} from ${failedEndpoint}`, async () => {
+        const calls: string[] = [];
+        const fetcher: Fetcher = async url => {
+          calls.push(url);
+          return url === failedEndpoint ? Response.json({}, { status, headers: { "retry-after": "19" } })
+            : Response.json({ config: { ...WEEKLY_PAYLOAD.config, isUnifiedBillingUser: true } });
+        };
+        const error = await expectKind(() => xaiOauthConnector.fetchUsage({
+          request: usageRequest({ credential: oauthCredential({ refresh: null, identity: { email: "synthetic@example.invalid" } }) }),
+          fetcher, nowMs: NOW_MS,
+        }), kind);
+        expect(calls).toEqual(failedEndpoint === CREDITS_URL ? [CREDITS_URL] : [CREDITS_URL, MONTHLY_URL]);
+        if (status === 429) expect(error.retryAfterMs).toBe(19_000);
+      });
+    }
+  }
+
+  test("does not invent inferred unified weekly quota after a monthly failure", async () => {
+    const fetcher = mockFetcher({
+      [`GET ${CREDITS_URL}`]: { status: 200, body: UNIFIED_CREDITS_PAYLOAD },
+      [`GET ${MONTHLY_URL}`]: { status: 500, body: {} },
+    });
+    await expectKind(() => xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS }), "upstreamError");
+  });
+
+  test("rejects stale inferred weekly data", async () => {
+    const fetcher = mockFetcher({
+      [`GET ${CREDITS_URL}`]: { status: 200, body: { config: {
+        currentPeriod: { ...WEEKLY_PAYLOAD.config.currentPeriod, end: new Date(NOW_MS).toISOString() },
+      } } },
+      [`GET ${MONTHLY_URL}`]: { status: 200, body: { config: {} } },
+    });
+    await expectKind(() => xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS }), "noData");
+  });
+
+  test("rejects redirects on userinfo, refresh and billing in actual RequestInit", async () => {
+    const fetcher = mockFetcher({
+      [`GET ${DISCOVERY_URL}`]: { status: 200, body: { token_endpoint: TOKEN_URL } },
+      [`POST ${TOKEN_URL}`]: { status: 200, body: { access_token: ACCESS_2, refresh_token: REFRESH_2, expires_in: 3600 } },
+      [`GET ${USERINFO_URL}`]: { status: 200, body: { email: "synthetic@example.invalid" } },
+      [`GET ${CREDITS_URL}`]: { status: 200, body: { config: { ...WEEKLY_PAYLOAD.config, isUnifiedBillingUser: true } } },
+      [`GET ${MONTHLY_URL}`]: { status: 200, body: MONTHLY_PAYLOAD },
+    });
+    await xaiOauthConnector.fetchUsage({
+      request: usageRequest({ credential: oauthCredential({ expiresAtMs: null }) }), fetcher, nowMs: NOW_MS,
+    });
+    for (const call of fetcher.calls.filter(call => call.url !== DISCOVERY_URL)) expect(call.init.redirect).toBe("error");
+  });
+
   test("fetches weekly credits with Bearer access and maps the OMP normalization", async () => {
     expect(xaiOauthConnector.providerId).toBe("xai-oauth");
     expect(xaiOauthConnector.connectorVersion).toBe("xai-oauth-1");
@@ -717,10 +855,10 @@ describe("xaiOauthAuth", () => {
       accountLabel: "dev@x.ai",
     });
 
-    expect(events).toEqual([
+    expect(events.map(event => event.type)).toEqual(["openUrl", "code", "waiting"]);
+    expect(events.slice(0, 2)).toEqual([
       { type: "openUrl", url: "https://auth.x.ai/device?user_code=WDJB-MJHT" },
       { type: "code", code: "WDJB-MJHT", verificationUrl: "https://auth.x.ai/device" },
-      { type: "waiting", detail: "Waiting for xAI device authorization..." },
     ]);
 
     expect(fetcher.calls.map((call) => `${call.method} ${call.url}`)).toEqual([
@@ -766,6 +904,7 @@ describe("xaiOauthAuth", () => {
           200,
         );
       }
+      if (url === USERINFO_URL) return Response.json({});
       expect(init.method).toBe("POST");
       tokenPolls += 1;
       // RFC 8628 §3.5: pending/slow_down are 400-class responses carrying an
@@ -775,8 +914,7 @@ describe("xaiOauthAuth", () => {
         : jsonResponse({ access_token: accessToken, refresh_token: "xai-refresh-login-2", expires_in: 3600 }, 200);
     };
 
-    // userinfo is unrouted: the best-effort identity fetch must swallow the
-    // mock's no-route failure and fall back to the (opaque) access token.
+    // Empty optional identity falls back to the opaque access token.
     const result = await loginXaiOauth(
       "device",
       {},
@@ -973,4 +1111,187 @@ describe("xaiOauthAuth", () => {
       "invalidRequest",
     );
   });
+});
+
+describe("xAI optional identity deadline", () => {
+  function loginFetcher(identityFetch: Fetcher): Fetcher {
+    return async (url, init) => {
+      if (url === DISCOVERY_URL) return Response.json({ token_endpoint: TOKEN_URL });
+      if (url === DEVICE_AUTHORIZATION_URL) return Response.json({
+        device_code: "synthetic-device", user_code: "SYNTHETIC",
+        verification_uri: "https://auth.x.ai/device",
+        verification_uri_complete: "https://auth.x.ai/device?user_code=SYNTHETIC", expires_in: 900, interval: 5,
+      });
+      if (url === TOKEN_URL) return Response.json({ access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600 });
+      if (url === USERINFO_URL) return identityFetch(url, init);
+      throw new Error("unrouted synthetic login HTTP request");
+    };
+  }
+
+  for (const [field, value, kind] of [
+    ["device_code", undefined, "authRequired"], ["user_code", "", "authRequired"],
+    ["verification_uri", undefined, "authRequired"], ["verification_uri_complete", undefined, "authRequired"],
+    ["expires_in", undefined, "authRequired"], ["expires_in", 0, "authRequired"],
+    ["expires_in", -1, "authRequired"], ["expires_in", "900", "authRequired"],
+    ["interval", undefined, "authRequired"], ["interval", 0, "authRequired"], ["interval", -1, "authRequired"],
+    ["verification_uri", "http://auth.x.ai/device", "malformedPayload"],
+    ["verification_uri", "https://auth.x.ai.evil.invalid/device", "malformedPayload"],
+    ["verification_uri_complete", "https://grok.com/device", "malformedPayload"],
+  ] as const) {
+    test(`retains strict device validation for ${field}=${String(value)}`, async () => {
+      const fetcher = mockFetcher({
+        [`GET ${DISCOVERY_URL}`]: { status: 200, body: { token_endpoint: TOKEN_URL } },
+        [`POST ${DEVICE_AUTHORIZATION_URL}`]: { status: 200, body: {
+          device_code: "synthetic-device", user_code: "SYNTHETIC",
+          verification_uri: "https://auth.x.ai/device", verification_uri_complete: "https://auth.x.ai/device?user_code=SYNTHETIC",
+          expires_in: 900, interval: 5, [field]: value,
+        } },
+      });
+      await expectKind(() => loginXaiOauth("device", {}, { onEvent: () => {} }, new AbortController().signal, {
+        fetcher, now: () => NOW_MS,
+      }), kind);
+      expect(fetcher.calls.map(call => call.url)).toEqual([DISCOVERY_URL, DEVICE_AUTHORIZATION_URL]);
+    });
+  }
+
+  for (const endpoint of ["http://auth.x.ai/token", "https://auth.x.ai.evil.invalid/token", "https://grok.com/token"]) {
+    test(`does not send refresh credentials to unpinned discovery endpoint ${endpoint}`, async () => {
+      const fetcher = mockFetcher({ [`GET ${DISCOVERY_URL}`]: { status: 200, body: { token_endpoint: endpoint } } });
+      await expectKind(() => xaiOauthConnector.fetchUsage({
+        request: usageRequest({ credential: oauthCredential({ expiresAtMs: null }) }), fetcher, nowMs: NOW_MS,
+      }), "malformedPayload");
+      expect(fetcher.calls.map(call => call.url)).toEqual([DISCOVERY_URL]);
+    });
+  }
+
+  test("bounds optional identity independently and retains minted login tokens on identity timeout", async () => {
+    const parent = new AbortController();
+    const deadline = new AbortController();
+    const requested: number[] = [];
+    let observedAbort = false;
+    const deps = {
+      now: () => NOW_MS,
+      identityTimeoutSignal: (ms: number) => { requested.push(ms); return deadline.signal; },
+      fetcher: loginFetcher(async (_url, init) => {
+        init.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+        deadline.abort(new DOMException("synthetic identity deadline", "TimeoutError"));
+        init.signal?.throwIfAborted();
+        return Response.json({ email: "should-not-arrive@example.invalid" });
+      }),
+    };
+    const result = await loginXaiOauth("device", {}, { onEvent: () => {} }, parent.signal, deps);
+    expect(requested).toEqual([15_000]);
+    expect(observedAbort).toBe(true);
+    expect(parent.signal.aborted).toBe(false);
+    expect(result.accountLabel).toBeUndefined();
+    expect(result.credential).toMatchObject({ oauth: { access: ACCESS, refresh: REFRESH, expiresAtMs: NOW_MS + 3_600_000 - SKEW_MS } });
+  });
+
+  for (const phase of ["headers", "body"] as const) {
+    test(`does not swallow parent cancellation during optional identity ${phase}`, async () => {
+      const parent = new AbortController();
+      let observedAbort = false;
+      const fetcher = loginFetcher(async (_url, init) => {
+        init.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+        if (phase === "body") return new Response(new ReadableStream({
+          pull(controller) {
+            parent.abort();
+            controller.error(new DOMException("cancelled during body", "AbortError"));
+          },
+        }));
+        parent.abort();
+        init.signal?.throwIfAborted();
+        return Response.json({});
+      });
+      await expectKind(() => loginXaiOauth("device", {}, { onEvent: () => {} }, parent.signal, { fetcher, now: () => NOW_MS }), "timeout");
+      expect(observedAbort).toBe(true);
+    });
+  }
+});
+
+describe("xAI native transport and cancellation controls", () => {
+  for (const endpoint of [USERINFO_URL, TOKEN_URL, CREDITS_URL]) {
+    test(`native fetch rejects credential-bearing redirects from ${endpoint}`, async () => {
+      let targetHits = 0;
+      let sourceHits = 0;
+      const server = Bun.serve({
+        hostname: "127.0.0.1", port: 0,
+        fetch(request) {
+          if (new URL(request.url).pathname === "/source") {
+            sourceHits += 1;
+            return new Response(null, { status: 307, headers: { location: "/target" } });
+          }
+          targetHits += 1;
+          return Response.json({});
+        },
+      });
+      try {
+        const fetcher: Fetcher = async (url, init) => {
+          if (url === endpoint) return fetch(new URL("source", server.url), init);
+          if (url === DISCOVERY_URL) return Response.json({ token_endpoint: TOKEN_URL });
+          if (url === TOKEN_URL) return Response.json({ access_token: ACCESS_2, refresh_token: REFRESH_2, expires_in: 3600 });
+          if (url === USERINFO_URL) return Response.json({});
+          if (url === CREDITS_URL) return Response.json(WEEKLY_PAYLOAD);
+          if (url === MONTHLY_URL) return Response.json(MONTHLY_PAYLOAD);
+          throw new Error("unrouted native-fetch test request");
+        };
+        const action = () => xaiOauthConnector.fetchUsage({
+          request: usageRequest({ credential: oauthCredential({ expiresAtMs: null }) }), fetcher, nowMs: NOW_MS,
+        });
+        if (endpoint === TOKEN_URL) await expectKind(action, "transport");
+        else {
+          const response = await action();
+          expect(response.report.windows).toEqual(endpoint === CREDITS_URL ? MONTHLY_WINDOWS : WEEKLY_WINDOWS);
+        }
+        expect(sourceHits).toBe(1);
+        expect(targetHits).toBe(0);
+      } finally {
+        await server.stop(true);
+      }
+    });
+  }
+
+  for (const scenario of ["identity-timeout", "identity-cancel", "billing-cancel"] as const) {
+    test(`preserves rotation and parent deadline semantics on ${scenario}`, async () => {
+      const parent = new AbortController();
+      const identityDeadline = new AbortController();
+      const durations: number[] = [];
+      const connector = createXaiOauthConnector(ms => {
+        durations.push(ms);
+        return durations.length === 1 ? parent.signal : identityDeadline.signal;
+      });
+      const calls: string[] = [];
+      let observedAbort = false;
+      const fetcher: Fetcher = async (url, init) => {
+        calls.push(url);
+        if (url === DISCOVERY_URL) return Response.json({ token_endpoint: TOKEN_URL });
+        if (url === TOKEN_URL) return Response.json({ access_token: ACCESS_2, refresh_token: REFRESH_2, expires_in: 3600 });
+        if (url === USERINFO_URL || url === CREDITS_URL) {
+          const trigger = scenario === "billing-cancel" ? url === CREDITS_URL : url === USERINFO_URL;
+          if (trigger) {
+            init.signal?.addEventListener("abort", () => { observedAbort = true; }, { once: true });
+            (scenario === "identity-timeout" ? identityDeadline : parent).abort(new DOMException("synthetic deadline", "TimeoutError"));
+            init.signal?.throwIfAborted();
+          }
+          return Response.json(url === CREDITS_URL ? WEEKLY_PAYLOAD : {});
+        }
+        throw new Error("fallback after parent cancellation");
+      };
+      const request = usageRequest({ credential: oauthCredential({ expiresAtMs: null }) });
+      const action = () => connector.fetchUsage({ request, fetcher, nowMs: NOW_MS });
+      if (scenario === "identity-timeout") {
+        const response = await action();
+        expect(response.report.windows).toEqual(WEEKLY_WINDOWS);
+        expect(response.refreshedCredential).toMatchObject({ oauth: { access: ACCESS_2, refresh: REFRESH_2 } });
+        expect(parent.signal.aborted).toBe(false);
+      } else {
+        const error = await expectKind(action, "timeout");
+        expect(error.refreshedCredential).toMatchObject({ oauth: { access: ACCESS_2, refresh: REFRESH_2 } });
+        expect(calls).not.toContain(MONTHLY_URL);
+        if (scenario === "identity-cancel") expect(calls).not.toContain(CREDITS_URL);
+      }
+      expect(observedAbort).toBe(true);
+      expect(durations).toEqual([request.deadlineAtMs - NOW_MS, 15_000]);
+    });
+  }
 });
