@@ -50,7 +50,10 @@ export async function callProviderHttp(input: {
     json: async (): Promise<unknown> => {
       try {
         return await response.json();
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+          throw new BridgeError("timeout", `${input.endpointLabel} request timed out`);
+        }
         throw new BridgeError("malformedPayload", `${input.endpointLabel} returned a non-JSON body`);
       }
     },

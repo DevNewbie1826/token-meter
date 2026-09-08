@@ -121,6 +121,40 @@ describe("callProviderHttp", () => {
     }
   });
 
+  test.each(["AbortError", "TimeoutError"])("classifies real deferred JSON cancellation with %s", async (name) => {
+    const received = Promise.withResolvers<Response>();
+    const expired = Promise.withResolvers<never>();
+    const controller = new AbortController();
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+      return new Response(new ReadableStream<Uint8Array>({ start(stream) {
+        stream.enqueue(new TextEncoder().encode('{"pending":'));
+      } }), { headers: { "content-type": "application/json" } });
+    } });
+    const deadline = setTimeout(() => expired.reject(new Error("test deadline exceeded")), 2000);
+    try {
+      const result = await Promise.race([call(async (url, init) => {
+        const body = await fetch(url, init);
+        received.resolve(body);
+        return body;
+      }, { call: { url: server.url.href }, signal: controller.signal, extraSecrets: ["token-secret"] }), expired.promise]);
+      const body = await received.promise;
+      expect(result.status).toBe(200);
+      expect(body.bodyUsed).toBe(false);
+      const pending = errorOf(result.json());
+      expect(body.bodyUsed).toBe(true);
+      controller.abort(new DOMException("token-secret cancelled", name));
+      const error = await Promise.race([pending, expired.promise]);
+      expect(error).toBeInstanceOf(BridgeError);
+      expect(error.kind).toBe("timeout");
+      expect(error.message).not.toContain("token-secret");
+    } finally {
+      clearTimeout(deadline);
+      controller.abort();
+      await server.stop(true);
+      expect(server.pendingRequests).toBe(0);
+    }
+  });
+
   test("maps network failures to transport", async () => {
     const error = await errorOf(call(async () => { throw new Error("token-secret offline"); }, { extraSecrets: ["token-secret"] }));
     expect(error.kind).toBe("transport");
