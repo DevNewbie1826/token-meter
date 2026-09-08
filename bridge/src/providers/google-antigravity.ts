@@ -451,6 +451,7 @@ type DedupeEntry = {
   windowId: string;
   counterName: string | undefined;
   counterKey: string;
+  bareFullRemaining: boolean;
 };
 
 /**
@@ -472,10 +473,14 @@ function dedupeAntigravityLimits(modelInfos: readonly AntigravityModelInfo[], no
       const counterName = formatCounterName(quotaInfo);
       const counterKey = counterName?.toLowerCase() ?? "default";
       const windowId = window?.id ?? quotaInfo.windowId ?? "default";
+      // Capture before inferred daily descriptors erase the distinction between
+      // bare autocomplete counters and explicitly identified independent windows.
+      const bareFullRemaining = quotaInfo.remainingFraction === 1 && quotaInfo.resetTime === undefined &&
+        quotaInfo.windowId === undefined && quotaInfo.windowLabel === undefined;
       const key = `${counterKey}|${tierKey}|${windowId}`;
       const existing = deduped.get(key);
       if (existing === undefined) {
-        deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey });
+        deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey, bareFullRemaining });
         continue;
       }
       const eFrac = existing.amount.remainingFraction;
@@ -505,13 +510,16 @@ function dedupeAntigravityLimits(modelInfos: readonly AntigravityModelInfo[], no
         windowId: existing.windowId,
         counterName: existing.counterName,
         counterKey: existing.counterKey,
+        bareFullRemaining: existing.bareFullRemaining && bareFullRemaining,
       });
     }
   }
   const meteredCounters = new Set([...deduped.values()]
     .filter(entry => entry.window?.resetsAt !== undefined)
     .map(entry => `${entry.counterKey}|${entry.tierKey}`));
-  return [...deduped.values()].filter(entry => entry.window?.resetsAt !== undefined ||
+  // A missing reset alone is not phantom evidence. Suppress only bare unused
+  // duplicates beside a metered sibling, retaining consumed or explicit windows.
+  return [...deduped.values()].filter(entry => !entry.bareFullRemaining ||
     !meteredCounters.has(`${entry.counterKey}|${entry.tierKey}`));
 }
 

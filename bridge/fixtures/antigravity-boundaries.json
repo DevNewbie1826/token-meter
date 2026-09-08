@@ -1,0 +1,38 @@
+{
+  "legacy-independent": {
+    "summary": {},
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfos": [
+      { "windowId": "daily", "remainingFraction": 0.9, "resetTime": "2026-08-18T05:00:00Z" },
+      { "windowId": "weekly", "remainingFraction": 0.01 }
+    ] } } }
+  },
+  "weeklyreset": {
+    "summary": {},
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfos": [
+      { "windowId": "daily", "remainingFraction": 0.9, "resetTime": "2026-08-18T05:00:00Z" },
+      { "windowId": "weekly", "remainingFraction": 0.01, "resetTime": "2026-08-21T12:00:00Z" }
+    ] } } }
+  },
+  "truebarephantom": {
+    "summary": {},
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfos": [
+      { "remainingFraction": 1 },
+      { "windowId": "weekly", "remainingFraction": 0.01, "resetTime": "2026-08-21T12:00:00Z" }
+    ] } } }
+  },
+  "consumed-no-reset": {
+    "summary": {},
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfos": [
+      { "remainingFraction": 0.01 },
+      { "windowId": "weekly", "remainingFraction": 0.9, "resetTime": "2026-08-21T12:00:00Z" }
+    ] } } }
+  },
+  "empty-bucket": {
+    "summary": { "buckets": [{}] },
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfo": { "remainingFraction": 0.125 } } } }
+  },
+  "empty-sibling": {
+    "summary": { "buckets": [{ "bucketId": "usable", "remainingFraction": 0.5 }, {}] },
+    "legacy": { "models": { "google": { "modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfo": { "remainingFraction": 0.125 } } } }
+  }
+}

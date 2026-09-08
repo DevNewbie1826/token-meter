@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import summaryFixture from "../fixtures/antigravity-summary.json";
 import remainingFixture from "../fixtures/antigravity-remaining.json";
+import boundaryFixtures from "../fixtures/antigravity-boundaries.json";
 import {
   fetchAntigravityUsage,
   googleAntigravityAuth,
@@ -1430,6 +1431,114 @@ describe("Antigravity current control plane", () => {
     ]);
     expect(outcome.error?.kind).toBe("upstreamError");
     expect(outcome.result).toBeUndefined();
+  });
+});
+
+describe("Antigravity revision boundaries", () => {
+  for (const [scenario, ids, fractions, resets] of [
+    ["legacy-independent", ["weekly", "daily"], [0.99, 0.1], [undefined, 1787029200000]],
+    ["weeklyreset", ["weekly", "daily"], [0.99, 0.1], [WEEKLY_RESET_MS, 1787029200000]],
+    ["truebarephantom", ["weekly"], [0.99], [WEEKLY_RESET_MS]],
+    ["consumed-no-reset", ["daily", "weekly"], [0.99, 0.1], [undefined, WEEKLY_RESET_MS]],
+  ] as const) {
+    test(`preserves independent legacy evidence: ${scenario}`, async () => {
+      const fixture = boundaryFixtures[scenario];
+      const fetcher = mockFetcher({
+        [`POST ${SUMMARY_URL}`]: { status: 200, body: fixture.summary },
+        [`POST ${USAGE_URL}`]: { status: 200, body: fixture.legacy },
+      });
+      const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+      expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL, USAGE_URL]);
+      expect(response.report.windows.map(w => w.id)).toEqual(ids.map(id => `google-antigravity:google:default:${id}`));
+      expect(response.report.windows.map(w => w.resetsAtMs)).toEqual([...resets]);
+      for (const [index, window] of response.report.windows.entries()) {
+        const fraction = fractions[index];
+        if (fraction === undefined) throw new Error("unexpected quota row");
+        expect(window.resolvedFraction).toBeCloseTo(fraction, 12);
+        expect(window.used).toBeCloseTo(fraction * 100, 12);
+        expect(window.limit).toBe(100);
+        expect(window.unit).toBe("percent");
+        expect(window.severity).toBe(fraction === 0.99 ? "critical" : "ok");
+      }
+    });
+  }
+
+  for (const explicit of [{ windowId: "daily" }, { windowLabel: "Daily" }]) {
+    for (const reverse of [false, true]) {
+      test(`preserves explicit full-remaining window through bare duplicate merge: ${JSON.stringify(explicit)} reverse=${reverse}`, async () => {
+        const entries = [{ remainingFraction: 1 }, { ...explicit, remainingFraction: 1 }];
+        const fetcher = mockFetcher({
+          [`POST ${SUMMARY_URL}`]: { status: 200, body: {} },
+          [`POST ${USAGE_URL}`]: { status: 200, body: { models: { google: {
+            modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfos: [
+              ...(reverse ? entries.toReversed() : entries),
+              { windowId: "weekly", remainingFraction: 0.01, resetTime: WEEKLY_RESET_ISO },
+            ],
+          } } } },
+        });
+        const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+        expect(response.report.windows.map(w => w.id)).toEqual([
+          "google-antigravity:google:default:weekly", "google-antigravity:google:default:daily",
+        ]);
+        expect(response.report.windows.map(w => w.resolvedFraction)).toEqual([0.99, 0]);
+        expect(response.report.windows.map(w => w.severity)).toEqual(["critical", "ok"]);
+        expect(response.report.windows[1]?.resetsAtMs).toBeUndefined();
+      });
+    }
+  }
+
+  test("preserves a full-remaining window identified by its legacy container", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: {} },
+      [`POST ${USAGE_URL}`]: { status: 200, body: { models: { google: {
+        modelProvider: "MODEL_PROVIDER_GOOGLE", dailyQuotaInfo: { remainingFraction: 1 },
+        weeklyQuotaInfo: { remainingFraction: 0.01, resetTime: WEEKLY_RESET_ISO },
+      } } } },
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(w => w.id)).toEqual([
+      "google-antigravity:google:default:weekly", "google-antigravity:google:default:daily",
+    ]);
+    expect(response.report.windows.map(w => w.resolvedFraction)).toEqual([0.99, 0]);
+  });
+
+  test("preserves bare full remaining when no metered sibling evidences a phantom", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: {} },
+      [`POST ${USAGE_URL}`]: { status: 200, body: { models: { google: {
+        modelProvider: "MODEL_PROVIDER_GOOGLE", quotaInfo: { remainingFraction: 1 },
+      } } } },
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows).toHaveLength(1);
+    expect(response.report.windows[0]).toMatchObject({
+      id: "google-antigravity:google:default:daily", resolvedFraction: 0, severity: "ok", used: 0, limit: 100,
+    });
+  });
+
+  test("populated amountless summary returns noData without legacy fallback", async () => {
+    const fixture = boundaryFixtures["empty-bucket"];
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: fixture.summary },
+      [`POST ${USAGE_URL}`]: { status: 200, body: fixture.legacy },
+    });
+    const error = await bridgeErrorFrom(() => fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL]);
+  });
+
+  test("valid sibling survives populated amountless summary without legacy fallback", async () => {
+    const fixture = boundaryFixtures["empty-sibling"];
+    const fetcher = mockFetcher({
+      [`POST ${SUMMARY_URL}`]: { status: 200, body: fixture.summary },
+      [`POST ${USAGE_URL}`]: { status: 200, body: fixture.legacy },
+    });
+    const response = await fetchAntigravityUsage({ request: antigravityUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls.map(c => c.url)).toEqual([SUMMARY_URL]);
+    expect(response.report.windows).toEqual([{
+      id: "google-antigravity:summary:0:usable:0", label: "Usage", unit: "percent", severity: "ok",
+      remaining: 50, remainingFraction: 0.5, used: 50, limit: 100, resolvedFraction: 0.5,
+    }]);
   });
 });
 
