@@ -8,6 +8,7 @@ export type ProviderHttpCall = {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  redirect?: NonNullable<RequestInit["redirect"]>;
 };
 
 export async function callProviderHttp(input: {
@@ -25,12 +26,13 @@ export async function callProviderHttp(input: {
       ...(input.call.method === undefined ? {} : { method: input.call.method }),
       ...(input.call.headers === undefined ? {} : { headers: input.call.headers }),
       ...(input.call.body === undefined ? {} : { body: input.call.body }),
+      ...(input.call.redirect === undefined ? {} : { redirect: input.call.redirect }),
       signal: input.signal,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const safe = redactSecrets(message, input.extraSecrets ?? []);
-    if (error instanceof Error && error.name === "AbortError") {
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
       throw new BridgeError("timeout", `${input.endpointLabel} request timed out${safe ? `: ${safe}` : ""}`);
     }
     throw new BridgeError("transport", `network failure contacting ${input.endpointLabel}${safe ? `: ${safe}` : ""}`);
