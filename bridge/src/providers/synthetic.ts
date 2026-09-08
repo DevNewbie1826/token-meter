@@ -12,8 +12,8 @@
  */
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
 import { callProviderHttp, type Fetcher } from "../connectors/provider-http";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeSuccessResponse, Severity, UsageUnit, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeSuccessResponse, UsageUnit, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "synthetic";
 const CONNECTOR_VERSION = "synthetic-1";
@@ -169,22 +169,21 @@ function parseRollingFiveHourLimit(raw: unknown): UsageWindow | undefined {
   }
   const used = max !== undefined && remaining !== undefined ? max - remaining : undefined;
   const resolvedFraction = fractionFromUsedLimit(used, max);
-  const limited = raw["limited"] === true;
-  const severity: Severity = limited ? "exhausted" : (ompStatus(resolvedFraction) ?? "ok");
   return usageWindow({
     id: "synthetic:requests:5h",
     label: "Synthetic Requests",
     unit: "requests",
     used,
     limit: max,
+    remaining,
     resolvedFraction,
-    severity,
   });
 }
 
 /**
  * Port of OMP `parseWeeklyTokenLimit`. `used` comes from `percentRemaining`
- * (not remaining-credits subtraction). `nextRegenAt` is omitted as a reset.
+ * when present (rounded dollar amounts can disagree). Without a percent,
+ * known remaining/maximum amounts are used. `nextRegenAt` is not a reset.
  */
 function parseWeeklyTokenLimit(raw: unknown): UsageWindow | undefined {
   if (!isRecord(raw)) {
@@ -196,17 +195,20 @@ function parseWeeklyTokenLimit(raw: unknown): UsageWindow | undefined {
     return undefined;
   }
   const percentRemaining = finiteNumber(raw["percentRemaining"]);
-  const resolvedFraction =
-    percentRemaining === undefined ? undefined : clamp01(1 - percentRemaining / 100);
-  const used = resolvedFraction !== undefined && maxCredits !== undefined ? resolvedFraction * maxCredits : undefined;
+  const percentFraction = percentRemaining === undefined ? undefined : clamp01(1 - percentRemaining / 100);
+  const used = maxCredits === undefined ? undefined
+    : percentFraction !== undefined ? percentFraction * maxCredits
+    : remainingCredits !== undefined ? maxCredits - remainingCredits : undefined;
+  const resolvedFraction = fractionFromUsedLimit(used, maxCredits) ?? percentFraction;
   return usageWindow({
     id: "synthetic:usd:7d",
     label: "Synthetic Credits",
     unit: "usd",
     used,
     limit: maxCredits,
+    // Do not mix rounded dollar balances with the authoritative percentage.
+    remaining: percentFraction === undefined || maxCredits === undefined ? remainingCredits : undefined,
     resolvedFraction,
-    severity: ompStatus(resolvedFraction) ?? "unknown",
   });
 }
 
@@ -216,39 +218,31 @@ function usageWindow(input: {
   unit: UsageUnit;
   used: number | undefined;
   limit: number | undefined;
+  remaining: number | undefined;
   resolvedFraction: number | undefined;
-  severity: Severity;
 }): UsageWindow {
+  if ((input.used !== undefined && input.used < 0) || (input.limit !== undefined && input.limit <= 0)
+    || (input.remaining !== undefined && (input.remaining < 0 || (input.limit !== undefined && input.remaining > input.limit)))) {
+    throw new BridgeError("malformedPayload", "Synthetic quotas contain invalid amounts");
+  }
   return {
     id: input.id,
     label: input.label,
     unit: input.unit,
-    severity: input.severity,
+    // limited is not a utilization value and cannot override a known ratio.
+    severity: severityForFraction(input.resolvedFraction),
     ...(input.used !== undefined ? { used: input.used } : {}),
     ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    ...(input.remaining !== undefined ? { remaining: input.remaining } : {}),
     ...(input.resolvedFraction !== undefined ? { resolvedFraction: input.resolvedFraction } : {}),
   };
-}
-
-/** Port of OMP `getUsageStatus` in packages/ai/src/usage/synthetic.ts. */
-function ompStatus(usedFraction: number | undefined): Severity | undefined {
-  if (usedFraction === undefined) {
-    return undefined;
-  }
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
 }
 
 function fractionFromUsedLimit(used: number | undefined, limit: number | undefined): number | undefined {
   if (used === undefined || limit === undefined || limit <= 0) {
     return undefined;
   }
-  return Math.min(used / limit, 1);
+  return used / limit;
 }
 
 function parseDollarAmount(value: unknown): number | undefined {

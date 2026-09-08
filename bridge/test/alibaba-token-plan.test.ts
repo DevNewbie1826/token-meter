@@ -737,3 +737,16 @@ describe("alibaba-token-plan auth — duplex prompts", () => {
     expect(result.credential).toEqual({ kind: "apiKey", secret: API_TOKEN });
   });
 });
+
+// Shared wire bands, not the upstream provider-local ladder.
+describe("Alibaba wire conformance", () => {
+  test.each([[79.9, "ok"], [80, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"]] as const)("uses wire severity at %s percent", async (percent, severity) => {
+    const response = await runUsage(intlFetcher(200, { successResponse: true, data: { per5HourPercentage: percent } }));
+    expect(response.report.windows[0]).toMatchObject({ resolvedFraction: percent / 100, severity });
+  });
+  test("keeps cookie-bearing session and gateway redirects manual", async () => {
+    const fetcher = intlFetcher(200, INTL_USAGE_PAYLOAD);
+    await runUsage(fetcher);
+    expect(fetcher.calls.map(call => call.init.redirect)).toEqual(["manual", "manual"]);
+  });
+});

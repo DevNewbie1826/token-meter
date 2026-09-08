@@ -1,22 +1,66 @@
 /**
- * OpenCode Go provider, hand-ported from
- * packages/ai/src/registry/oauth/opencode.ts,
- * packages/ai/src/registry/opencode-go.ts, and
- * packages/ai/src/usage/opencode-go.ts
- * @ 8500092296621a6826b7136e840f8a59ea338958.
+ * OpenCode Go usage, hand-ported from packages/ai/src/usage/opencode-go.ts
+ * @ d720e81fb747132f0b6c6c0f44eafc887552ec7f.
+ * Auth is retained from packages/ai/src/registry/oauth/opencode.ts and
+ * packages/ai/src/registry/opencode-go.ts @ 8500092296621a6826b7136e840f8a59ea338958;
+ * those provider-specific registry files no longer exist at the usage pin.
  *
  * Auth is explicitly not OAuth: open https://opencode.ai/auth and paste the
  * API key. Usage is GET https://opencode.ai/zen/go/v1/usage with Bearer auth.
  */
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
 import { callProviderHttp } from "../connectors/provider-http";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeSuccessResponse, Severity, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeSuccessResponse, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "opencode-go";
 const CONNECTOR_VERSION = "opencode-go-1";
 const AUTH_URL = "https://opencode.ai/auth";
 const USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+// Current upstream packages/utils/src/dirs.ts + package.json at the pin above.
+const USER_AGENT = "omp/18.1.14";
+
+/** Non-secret installation metadata, separate from auth.json and ProviderAccounts. */
+function installationId(path: string): string {
+  try {
+    let contents: string;
+    try {
+      contents = readFileSync(path, "utf8");
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      const directory = dirname(path);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const temporary = mkdtempSync(join(directory, ".opencode-install-"));
+      try {
+        const candidate = join(temporary, "id");
+        writeFileSync(candidate, `${randomUUID()}\n`, { flag: "wx", mode: 0o600 });
+        try {
+          // Publish a complete file without overwriting a concurrent winner.
+          // Direct O_EXCL creation at `path` would expose an empty file to readers.
+          linkSync(candidate, path);
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+        }
+        contents = readFileSync(path, "utf8");
+      } finally {
+        rmSync(temporary, { recursive: true });
+      }
+    }
+    const id = contents.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      throw new BridgeError("dependencyUnavailable", "OpenCode installation metadata is invalid");
+    }
+    return id;
+  } catch (error) {
+    if (error instanceof BridgeError) throw error;
+    // Never leak filesystem paths/content or silently use a per-process identity.
+    throw new BridgeError("dependencyUnavailable", "OpenCode installation metadata is unavailable");
+  }
+}
 
 /**
  * OMP `OPENCODE_GO_WINDOWS` limit ids / labels. Monthly is the subscription
@@ -27,20 +71,6 @@ const OPENCODE_GO_WINDOWS = [
   { key: "weekly", id: "weekly", label: "Weekly limit" },
   { key: "monthly", id: "monthly", label: "Monthly limit" },
 ] as const;
-
-/** Port of OMP `resolveStatus` in packages/ai/src/usage/opencode-go.ts. */
-function resolveSeverity(windowStatus: "ok" | "rate-limited", usedFraction: number): Severity {
-  if (windowStatus === "rate-limited") {
-    return "exhausted";
-  }
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.8) {
-    return "warning";
-  }
-  return "ok";
-}
 
 function decodeWindow(
   descriptor: (typeof OPENCODE_GO_WINDOWS)[number],
@@ -64,22 +94,26 @@ function decodeWindow(
   if (!Number.isFinite(resetsAtMs)) {
     return undefined;
   }
+  // Availability is separate from measured utilization. Preserve the upstream
+  // percent and show rate limiting only in the existing optional display label.
   const usedFraction = percent / 100;
   return {
     id: descriptor.id,
-    label: descriptor.label,
+    label: status === "rate-limited" ? `${descriptor.label} (rate-limited)` : descriptor.label,
     unit: "percent",
     resolvedFraction: usedFraction,
-    severity: resolveSeverity(status, usedFraction),
+    severity: severityForFraction(usedFraction),
     used: percent,
     resetsAtMs,
   };
 }
 
-export const opencodeGoConnector: ConnectorModule = {
+export const opencodeGoConnector = {
   providerId: PROVIDER_ID,
   connectorVersion: CONNECTOR_VERSION,
-  async fetchUsage({ request, fetcher, nowMs }): Promise<BridgeSuccessResponse> {
+  async fetchUsage({ request, fetcher, nowMs, installationIdPath = join(homedir(), "Library", "Application Support", "TokenMeter", "opencode-install-id") }:
+    Parameters<ConnectorModule["fetchUsage"]>[0] & { readonly installationIdPath?: string },
+  ): Promise<BridgeSuccessResponse> {
     if (request.providerId !== PROVIDER_ID) {
       throw new BridgeError("invalidProvider", `unsupported provider: ${request.providerId}`);
     }
@@ -95,6 +129,8 @@ export const opencodeGoConnector: ConnectorModule = {
         headers: {
           accept: "application/json",
           authorization: `Bearer ${secret}`,
+          "User-Agent": USER_AGENT,
+          "x-opencode-session": installationId(installationIdPath),
         },
       },
       fetcher,
@@ -137,7 +173,7 @@ export const opencodeGoConnector: ConnectorModule = {
       },
     };
   },
-};
+} satisfies ConnectorModule;
 
 export const opencodeGoAuth: AuthModule = {
   providerId: PROVIDER_ID,

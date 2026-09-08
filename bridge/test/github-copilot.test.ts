@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { githubCopilotAuth, githubCopilotConnector, loginGitHubCopilot } from "../src/providers/github-copilot";
 import { BridgeError } from "../src/protocol";
 import type { BridgeErrorKind, OAuthCredential } from "../src/protocol";
@@ -14,7 +17,8 @@ const ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const USER_URL = "https://api.github.com/user";
 const BILLING_URL = "https://api.github.com/users/octocat/settings/billing/premium_request/usage";
 const QUOTA_URL = "https://api.github.com/copilot_internal/user";
-const CLIENT_ID = "Ov23li8tweQw6odWQebz";
+const CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
+const OLD_CLIENT_ID = "Ov23li8tweQw6odWQebz";
 /** OMP FAR_FUTURE_MS: 10 years from login (virtual) now. */
 const FAR_FUTURE_MS = 10 * 365.25 * 24 * 60 * 60 * 1000;
 
@@ -40,7 +44,7 @@ const BILLING_BODY = {
 };
 
 const DEVICE_CODE_BODY = {
-  device_code: "dc_test",
+  device_code: "dc_test +/&=",
   user_code: "ABCD-1234",
   verification_uri: "https://github.com/login/device",
   interval: 5,
@@ -181,7 +185,13 @@ describe("githubCopilotConnector", () => {
     const billingHeaders = new Headers(fetcher.calls[1]?.init.headers);
     expect(identityHeaders.get("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(billingHeaders.get("authorization")).toBe(`Bearer ${TOKEN}`);
-    expect(billingHeaders.get("accept")).toBe("application/vnd.github+json");
+    expect(Object.fromEntries(billingHeaders)).toEqual({
+      authorization: `Bearer ${TOKEN}`,
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2022-11-28",
+      "user-agent": "token-meter-bridge/1.0.0",
+    });
+    expect(Object.fromEntries(identityHeaders)).toEqual(Object.fromEntries(billingHeaders));
 
     expect(response.status).toBe("ok");
     expect(response.providerId).toBe("github-copilot");
@@ -332,7 +342,12 @@ describe("githubCopilotConnector — oauth quota route (OMP /copilot_internal/us
     // OMP fetchInternalUsage: the GitHub token (refresh ?? access) rides Bearer
     // with the OpenCode UA and JSON accepts.
     expect(headers.get("authorization")).toBe("Bearer gho_oauth_refresh_unit");
-    expect(headers.get("user-agent")).toBe("opencode/1.3.15");
+    expect(Object.fromEntries(headers)).toEqual({
+      authorization: "Bearer gho_oauth_refresh_unit",
+      "user-agent": "copilot/1.0.82",
+      accept: "application/json",
+      "content-type": "application/json",
+    });
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.get("content-type")).toBe("application/json");
     expect(fetcher.calls[0]?.init.body).toBeUndefined();
@@ -373,7 +388,7 @@ describe("githubCopilotConnector — oauth quota route (OMP /copilot_internal/us
     expect(JSON.stringify(response)).not.toContain("gho_oauth_access_unit");
   });
 
-  test("keeps fractions nil for unlimited snapshots and exhausted/warning bands", async () => {
+  test("omits unmetered unlimited snapshots and uses closed-wire bands", async () => {
     const fetcher = mockFetcher({
       [`GET ${QUOTA_URL}`]: {
         status: 200,
@@ -420,21 +435,24 @@ describe("githubCopilotConnector — oauth quota route (OMP /copilot_internal/us
       fetcher,
       nowMs: NOW_MS,
     });
-    // Unlimited stays nil on every amount and severity stays ok (OMP deriveStatus).
+    // Unlimited has no measurable amount; do not emit an undecodable empty row.
     const premium = response.report.windows.find((window) => window.id === "copilot:premium");
-    expect(premium).toEqual({
-      id: "copilot:premium",
-      label: "Premium Requests",
-      unit: "requests",
-      severity: "ok",
-      resetsAtMs: Date.parse("2026-09-01T00:00:00Z"),
-    });
-    // 97% used -> remainingFraction 0.03 -> warning; 100% used -> exhausted.
+    expect(premium).toBeUndefined();
+    // 97% used -> critical; 100% used -> exhausted.
     const completions = response.report.windows.find((window) => window.id === "copilot:completions");
-    expect(completions?.severity).toBe("warning");
+    expect(completions?.severity).toBe("critical");
     const chat = response.report.windows.find((window) => window.id === "copilot:chat");
     expect(chat?.severity).toBe("exhausted");
     expect(chat?.resolvedFraction).toBe(1);
+  });
+
+  test("returns typed noData rather than an empty meter for unlimited-only quotas", async () => {
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: { quota_snapshots: {
+      premium_interactions: { entitlement: 0, remaining: 0, percent_remaining: 100, unlimited: true },
+    } } } });
+    await expectKind(() => githubCopilotConnector.fetchUsage({
+      request: usageRequest({ credential: oauthCredential() }), fetcher, nowMs: NOW_MS,
+    }), "noData");
   });
 
   test("derives the enterprise API base URL from the credential identity", async () => {
@@ -488,6 +506,82 @@ describe("githubCopilotConnector — oauth quota route (OMP /copilot_internal/us
   });
 });
 
+describe("Copilot compatibility controls", () => {
+  test.each([
+    [0.799, "ok"], [0.8, "warning"], [0.875, "warning"],
+    [0.899, "warning"], [0.95, "critical"], [0.999, "critical"], [1, "exhausted"],
+  ] as const)("uses Swift wire severity at %s used", async (fraction, severity) => {
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: {
+      quota_snapshots: { premium_interactions: {
+        entitlement: 1000, remaining: Math.round(1000 * (1 - fraction)),
+        percent_remaining: 100 * (1 - fraction), unlimited: false,
+      } },
+    } } });
+    const response = await githubCopilotConnector.fetchUsage({
+      request: usageRequest({ credential: oauthCredential() }), fetcher, nowMs: NOW_MS,
+    });
+    expect(response.report.windows[0]?.resolvedFraction).toBe(fraction);
+    expect(response.report.windows[0]?.severity).toBe(severity);
+  });
+
+  test.each(["ghe.corp.example", "api.ghe.corp.example", "https://api.ghe.corp.example/", "http://api.ghe.corp.example"])(
+    "preserves the enterprise URL rule for %s and expired old-app tokens", async enterpriseUrl => {
+      const expectedBase = enterpriseUrl.startsWith("http://")
+        ? "http://api.ghe.corp.example" : "https://api.ghe.corp.example";
+      const fetcher = mockFetcher({ [`GET ${expectedBase}/copilot_internal/user`]: { status: 200, body: QUOTA_BODY } });
+      const credential = oauthCredential({ clientId: OLD_CLIENT_ID, expiresAtMs: 1, identity: { enterpriseUrl } });
+      const response = await githubCopilotConnector.fetchUsage({ request: usageRequest({ credential }), fetcher, nowMs: NOW_MS });
+      expect(fetcher.calls).toHaveLength(1);
+      expect(new Headers(fetcher.calls[0]?.init.headers).get("authorization")).toBe(`Bearer ${credential.oauth.refresh}`);
+      expect(response.refreshedCredential).toBeUndefined();
+      expect(credential.oauth.clientId).toBe(OLD_CLIENT_ID);
+    },
+  );
+
+  test("uses an old stored access-only token without exchange", async () => {
+    const credential: OAuthCredential = { kind: "oauth", secret: TOKEN, oauth: { access: TOKEN, clientId: OLD_CLIENT_ID, expiresAtMs: 1 } };
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: QUOTA_BODY } });
+    const response = await githubCopilotConnector.fetchUsage({ request: usageRequest({ credential }), fetcher, nowMs: NOW_MS });
+    expect(fetcher.calls).toHaveLength(1);
+    expect(new Headers(fetcher.calls[0]?.init.headers).get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(response.refreshedCredential).toBeUndefined();
+  });
+
+  test("compiled login deadline cancels the real default poll wait and reaps", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "copilot-cancel-"));
+    const executable = join(directory, "probe");
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const compilation = Bun.spawn([process.execPath, "build", "test/github-copilot-process-probe.ts", "--compile", "--outfile", executable], {
+        cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+      });
+      const [buildExit] = await Promise.all([compilation.exited, new Response(compilation.stdout).text(), new Response(compilation.stderr).text()]);
+      expect(buildExit).toBe(0);
+      child = Bun.spawn([executable, "cancel-wait"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+      if (!child.stdin || typeof child.stdin === "number" || !child.stdout || typeof child.stdout === "number" || !child.stderr || typeof child.stderr === "number") throw new Error("expected pipes");
+      const output = new Response(child.stdout).text();
+      const events = new Response(child.stderr).text();
+      const exited = child.exited;
+      // Time is the behavior under test: the real CLI deadline aborts a 72s poll wait.
+      const now = Date.now();
+      child.stdin.write(JSON.stringify(buildLoginRequest({ method: "device", requestedAtMs: now, deadlineAtMs: now + 100, inputs: {} })) + "\n");
+      child.stdin.end();
+      const completed = Promise.all([exited, output, events]);
+      const watchdog = AbortSignal.timeout(2000);
+      const result = await Promise.race([
+        completed,
+        new Promise<never>((_, reject) => watchdog.addEventListener("abort", () => reject(new Error("compiled login did not reap after timeout")), { once: true })),
+      ]);
+      expect(result[0]).toBe(1);
+      expect(JSON.parse(result[1]).error.kind).toBe("timeout");
+      expect(result[2]).toContain('"type":"waiting"');
+    } finally {
+      if (child) { child.kill(); await child.exited; }
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10000);
+});
+
 describe("githubCopilotAuth", () => {
   test("stores a trimmed PAT as a bearer credential", async () => {
     expect(githubCopilotAuth.providerId).toBe("github-copilot");
@@ -524,6 +618,31 @@ describe("githubCopilotAuth", () => {
     );
     expect(error.message).toContain("cancelled");
     expect(error.message).not.toContain("ghp_x");
+  });
+
+  test.each([undefined, "https://ghe.corp.example/"])("device flow is accepted by an official form-only endpoint (%s)", async enterpriseHost => {
+    const calls: string[] = [];
+    const fetcher: Fetcher = async (url, init) => {
+      const outgoing = new Request(url, init);
+      const expectedHost = enterpriseHost ? "ghe.corp.example" : "github.com";
+      expect(new URL(outgoing.url).hostname).toBe(expectedHost);
+      calls.push(outgoing.url);
+      if (outgoing.headers.get("content-type") !== "application/x-www-form-urlencoded" ||
+          outgoing.headers.get("user-agent") !== "copilot-developer-action/0.0.1" ||
+          outgoing.headers.get("accept") !== "application/json") return Response.json({}, { status: 400 });
+      const form = Object.fromEntries(await outgoing.formData());
+      if (url.endsWith("/device/code")) {
+        expect(form).toEqual({ client_id: CLIENT_ID, scope: "read:user" });
+        return Response.json(DEVICE_CODE_BODY);
+      }
+      expect(form).toEqual({ client_id: CLIENT_ID, device_code: DEVICE_CODE_BODY.device_code,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code" });
+      return Response.json({ access_token: "synthetic-form-token" });
+    };
+    const result = await loginGitHubCopilot("device", enterpriseHost ? { enterpriseHost } : {},
+      { onEvent: () => {} }, new AbortController().signal, { fetcher, ...virtualClock() });
+    expect(result.credential.kind).toBe("oauth");
+    expect(calls).toHaveLength(2);
   });
 
   test("device login waits first at the OMP cadence and returns an oauth-origin credential", async () => {
@@ -574,19 +693,24 @@ describe("githubCopilotAuth", () => {
     ]);
     const deviceHeaders = new Headers(fetcher.calls[0]?.init.headers);
     expect(deviceHeaders.get("accept")).toBe("application/json");
-    expect(deviceHeaders.get("content-type")).toBe("application/json");
-    expect(deviceHeaders.get("user-agent")).toBe("opencode/1.3.15");
-    expect(JSON.parse(String(fetcher.calls[0]?.init.body))).toEqual({
+    expect(deviceHeaders.get("content-type")).toBe("application/x-www-form-urlencoded");
+    expect(deviceHeaders.get("user-agent")).toBe("copilot-developer-action/0.0.1");
+    expect(Object.fromEntries(new URLSearchParams(String(fetcher.calls[0]?.init.body)))).toEqual({
       client_id: CLIENT_ID,
       scope: "read:user",
     });
-    expect(JSON.parse(String(fetcher.calls[1]?.init.body))).toEqual({
+    expect(Object.fromEntries(new URLSearchParams(String(fetcher.calls[1]?.init.body)))).toEqual({
       client_id: CLIENT_ID,
-      device_code: "dc_test",
+      device_code: "dc_test +/&=",
       grant_type: "urn:ietf:params:oauth:grant-type:device_code",
     });
-    // Every request is deadline-abortable: each carries an AbortSignal.
+    // Both device and repeated token polls carry the official OAuth headers.
     for (const call of fetcher.calls) {
+      expect(Object.fromEntries(new Headers(call.init.headers))).toEqual({
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+        "user-agent": "copilot-developer-action/0.0.1",
+      });
       expect(call.init.signal).toBeInstanceOf(AbortSignal);
     }
   });
@@ -714,35 +838,23 @@ describe("githubCopilotAuth", () => {
   });
 
   test("device login settles when a poll fetcher ignores abort", async () => {
+    const entered = Promise.withResolvers<void>();
     const fetcher: Fetcher = async url => {
-      if (url === DEVICE_CODE_URL) {
-        return new Response(JSON.stringify(DEVICE_CODE_BODY), { status: 200 });
-      }
+      if (url === DEVICE_CODE_URL) return Response.json(DEVICE_CODE_BODY);
+      entered.resolve();
       return await new Promise<Response>(() => {});
     };
     const controller = new AbortController();
-    const abortTimer = setTimeout(() => controller.abort(), 10);
-    const login = loginGitHubCopilot("device", {}, { onEvent: () => {} }, controller.signal, {
-      fetcher,
-      sleep: async () => {},
-    });
-    const outcome = await Promise.race([
-      login.then(
-        () => "resolved",
-        error => error,
-      ),
-      Bun.sleep(250).then(() => "test-timeout"),
-    ]);
-    clearTimeout(abortTimer);
-
-    expect(outcome).not.toBe("test-timeout");
-    expect(outcome).toBeInstanceOf(BridgeError);
-    if (!(outcome instanceof BridgeError)) {
-      throw new Error("expected a BridgeError");
-    }
-    expect(outcome.kind).toBe("timeout");
-    expect(outcome.message).toContain("cancelled");
-  });
+    const outcome = expectKind(
+      () => loginGitHubCopilot("device", {}, { onEvent: () => {} }, controller.signal, {
+        fetcher, ...virtualClock(),
+      }),
+      "timeout",
+    );
+    await entered.promise;
+    controller.abort();
+    await outcome;
+  }, 1000);
 
   test("device login never hangs: a stalled device-code request aborts with the login signal", async () => {
     const controller = new AbortController();

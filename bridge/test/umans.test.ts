@@ -159,11 +159,11 @@ describe("umansConnector", () => {
     expect(hard?.used).toBe(838);
     expect(hard?.limit).toBe(1000);
     expect(hard?.resolvedFraction).toBeCloseTo(0.838, 3);
-    expect(hard?.severity).toBe("ok");
+    expect(hard?.severity).toBe("warning");
     expect(response.report.windows.some((window) => window.severity === "exhausted")).toBe(false);
   });
 
-  test("warns at a full soft cap and exhausts only the burst ceiling", async () => {
+  test("reports each exhausted cap independently", async () => {
     const fetcher = mockFetcher({
       [`GET ${USAGE_URL}`]: {
         status: 200,
@@ -177,7 +177,7 @@ describe("umansConnector", () => {
       },
     });
     const response = await runFetch(fetcher);
-    expect(response.report.windows.find((window) => window.id === "umans:requests:soft")?.severity).toBe("warning");
+    expect(response.report.windows.find((window) => window.id === "umans:requests:soft")?.severity).toBe("exhausted");
     expect(response.report.windows.find((window) => window.id === "umans:requests:hard")?.severity).toBe("exhausted");
   });
 
@@ -335,5 +335,16 @@ describe("umansAuth", () => {
     expect(cancelled.message.toLowerCase()).toContain("cancelled");
     expect(cancelled.message).not.toContain(API_KEY);
     expect(fetcher.calls).toHaveLength(0);
+  });
+});
+
+describe("Umans wire conformance", () => {
+  test.each([[79.9, "ok"], [80, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"], [120, "exhausted"]] as const)("keeps exact independent ratios at %s percent", async (used, severity) => {
+    const response = await runFetch(mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { limits: { requests: { limit: 100, hard_cap: 200 }, concurrency: { limit: 100 } }, usage: { weighted_in_window: used, requests_in_window: 2 * used, concurrent_sessions: used } } } }));
+    expect(response.report.windows.map(window => window.resolvedFraction)).toEqual([used / 100, used / 100, used / 100]);
+    expect(response.report.windows.map(window => window.severity)).toEqual([severity, severity, severity]);
+  });
+  test.each([{ used: -1, limit: 100 }, { used: 0, limit: 0 }])("rejects invalid amounts %j", async ({ used, limit }) => {
+    await expect(runFetch(mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { usage: { concurrent_sessions: used }, limits: { concurrency: { limit } } } } }))).rejects.toMatchObject({ kind: "malformedPayload" });
   });
 });

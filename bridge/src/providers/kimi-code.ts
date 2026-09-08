@@ -29,7 +29,7 @@
  *   hours collapse to Nh, whole days to Nd, else Nm, no duration -> default),
  *   with row-level reset times injected when the span window lacks one. Unit
  *   stays "unknown" (OMP never learns a unit for Kimi quotas); fractions are
- *   only ever used/limit (clamped), never invented; severity is translated to
+ *   only ever exact used/limit, never invented; severity is translated to
  *   TokenMeter's protocol-wide fraction bands so Swift can enforce
  *   fraction/severity consistency.
  *
@@ -48,8 +48,8 @@
  *   expired-token skip probe is replaced by the bridge rotation contract:
  *   rotate before the first call when expiresAtMs is missing/within 60s (and
  *   refresh material exists), rotate once and retry once on a mid-flow 401.
- * - OMP UsageLimit scope/metadata/raw and the amount remaining fields have no
- *   bridge UsageWindow equivalents and are dropped; window ids keep OMP's
+ * - OMP UsageLimit scope/metadata/raw are dropped. Remaining-only amounts are
+ *   preserved without inventing a denominator; window ids keep OMP's
  *   canonical span id ("kimi:7d", "kimi:5h", ...) instead of OMP's
  *   provider:index limit ids, which exist only for OMP's storage layer.
  * - OMP's non-oauth supports() gate becomes invalidRequest (the wire layer
@@ -320,6 +320,7 @@ type KimiUsageRow = {
   readonly label: string;
   readonly used?: number;
   readonly limit?: number;
+  readonly remaining?: number;
   readonly resetsAtMs?: number;
 };
 
@@ -334,10 +335,14 @@ function buildUsageRow(data: Record<string, unknown>, defaultLabel: string, nowM
   const limit = toNumber(data["limit"]);
   let used = toNumber(data["used"]);
   const remaining = toNumber(data["remaining"]);
+  if ((used !== undefined && used < 0) || (limit !== undefined && limit <= 0)
+    || (remaining !== undefined && (remaining < 0 || (limit !== undefined && remaining > limit)))) {
+    throw new BridgeError("malformedPayload", "Kimi usage contains invalid quota amounts");
+  }
   if (used === undefined && remaining !== undefined && limit !== undefined) {
     used = limit - remaining;
   }
-  if (used === undefined && limit === undefined) {
+  if (used === undefined && limit === undefined && remaining === undefined) {
     return undefined;
   }
   const resetsAtMs = parseResetTime(data, nowMs);
@@ -347,6 +352,7 @@ function buildUsageRow(data: Record<string, unknown>, defaultLabel: string, nowM
     label: name ?? title ?? defaultLabel,
     ...(used !== undefined ? { used } : {}),
     ...(limit !== undefined ? { limit } : {}),
+    ...(remaining !== undefined && limit === undefined ? { remaining } : {}),
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
   };
 }
@@ -392,14 +398,17 @@ function limitRowLabel(
 
 /**
  * One bridge UsageWindow per OMP-normalized limit: id keeps OMP's canonical
- * span id, the fraction is used/limit clamped to [0, 1] (never invented) and
+ * span id, the fraction is exact used/limit (including over-cap usage) and
  * severity follows TokenMeter's protocol-wide fraction bands.
  */
 function toUsageWindow(row: KimiUsageRow, window: KimiUsageWindow | undefined): UsageWindow {
   const resetsAtMs = window !== undefined ? (window.resetsAtMs ?? row.resetsAtMs) : row.resetsAtMs;
   let resolvedFraction: number | undefined;
   if (row.used !== undefined && row.limit !== undefined && row.limit > 0) {
-    resolvedFraction = Math.min(Math.max(row.used / row.limit, 0), 1);
+    resolvedFraction = row.used / row.limit;
+    if (!Number.isFinite(resolvedFraction)) {
+      throw new BridgeError("malformedPayload", "Kimi usage ratio is not finite");
+    }
   }
   return {
     id: `kimi:${window?.id ?? "default"}`,
@@ -409,6 +418,7 @@ function toUsageWindow(row: KimiUsageRow, window: KimiUsageWindow | undefined): 
     severity: severityForFraction(resolvedFraction),
     ...(row.used !== undefined ? { used: row.used } : {}),
     ...(row.limit !== undefined ? { limit: row.limit } : {}),
+    ...(row.remaining !== undefined ? { remaining: row.remaining } : {}),
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
   };
 }

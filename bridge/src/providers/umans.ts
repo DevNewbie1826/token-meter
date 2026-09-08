@@ -20,8 +20,8 @@
  */
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
 import { callProviderHttp, type Fetcher } from "../connectors/provider-http";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeSuccessResponse, Severity, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeSuccessResponse, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "umans";
 const CONNECTOR_VERSION = "umans-1";
@@ -69,35 +69,7 @@ function usedFractionOf(used: number | undefined, limit: number | undefined): nu
   if (used === undefined || limit === undefined || limit <= 0) {
     return undefined;
   }
-  return Math.min(used / limit, 1);
-}
-
-/** Port of OMP `resolveStatus` in packages/ai/src/usage/umans.ts. */
-function resolveStatus(usedFraction: number | undefined): Severity {
-  if (usedFraction === undefined) {
-    return "unknown";
-  }
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
-}
-
-/**
- * Port of OMP `softCapStatus`. Hitting the effective-request cap only means
- * burst headroom is in use; exhausted is reserved for the hard row.
- */
-function softCapStatus(usedFraction: number | undefined): Severity {
-  if (usedFraction === undefined) {
-    return "unknown";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
+  return used / limit;
 }
 
 function windowFrom(args: {
@@ -105,18 +77,21 @@ function windowFrom(args: {
   readonly label: string;
   readonly used: number | undefined;
   readonly limit: number | undefined;
-  readonly severity: Severity;
 }): UsageWindow | undefined {
   if (args.used === undefined && args.limit === undefined) {
     return undefined;
   }
   const resolvedFraction = usedFractionOf(args.used, args.limit);
+  if ((args.used !== undefined && args.used < 0) || (args.limit !== undefined && args.limit <= 0)
+    || (resolvedFraction !== undefined && !Number.isFinite(resolvedFraction))) {
+    throw new BridgeError("malformedPayload", "Umans usage contains invalid quota amounts");
+  }
   return {
     id: args.id,
     label: args.label,
     unit: "requests",
     ...(resolvedFraction !== undefined ? { resolvedFraction } : {}),
-    severity: args.severity,
+    severity: severityForFraction(resolvedFraction),
     ...(args.used !== undefined ? { used: args.used } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
   };
@@ -137,13 +112,11 @@ function requestWindows(payload: unknown): UsageWindow[] {
 
   if (weightedUsed === undefined || hardCap === undefined) {
     const used = weightedUsed ?? rawUsed;
-    const resolvedFraction = usedFractionOf(used, limit);
     const window = windowFrom({
       id: "umans:requests",
       label: "Requests (rolling 5h)",
       used,
       limit,
-      severity: resolveStatus(resolvedFraction),
     });
     return window === undefined ? [] : [window];
   }
@@ -154,7 +127,6 @@ function requestWindows(payload: unknown): UsageWindow[] {
     label: "Requests (soft cap)",
     used: weightedUsed,
     limit,
-    severity: softCapStatus(usedFractionOf(weightedUsed, limit)),
   });
   if (soft !== undefined) {
     windows.push(soft);
@@ -165,7 +137,6 @@ function requestWindows(payload: unknown): UsageWindow[] {
       label: "Requests (burst ceiling)",
       used: rawUsed,
       limit: hardCap,
-      severity: resolveStatus(usedFractionOf(rawUsed, hardCap)),
     });
     if (hard !== undefined) {
       windows.push(hard);
@@ -185,7 +156,6 @@ function concurrencyWindow(payload: unknown): UsageWindow | undefined {
     label: "Concurrency",
     used,
     limit,
-    severity: resolveStatus(usedFractionOf(used, limit)),
   });
 }
 

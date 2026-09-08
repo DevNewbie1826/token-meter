@@ -1,63 +1,26 @@
 /**
- * GitHub Copilot provider module (auth + usage).
+ * GitHub Copilot auth and quota port, source-only OMP
+ * d720e81fb747132f0b6c6c0f44eafc887552ec7f:
+ * - packages/ai/src/registry/oauth/github-copilot.ts: official Copilot CLI
+ *   OAuth app, form-encoded device/token requests, OAuth headers and cadence.
+ * - packages/ai/src/usage/github-copilot.ts: internal quota normalization and
+ *   enterprise API URL resolution.
+ * - packages/catalog/src/wire/github-copilot.ts: COPILOT_GITHUB_HEADERS only;
+ *   inference/CAPI identity and version headers do not belong on GitHub REST.
  *
- * Usage routing by credential origin:
- * - OAuth credentials (the device flow below) route to OMP's internal quota
- *   endpoint GET {githubApi}/copilot_internal/user with the quota/reset
- *   normalization from packages/ai/src/usage/github-copilot.ts @ 8500092.
- * - apiKey/bearer credentials (a pasted PAT) route to the documented user
- *   billing connector in `../connectors/github-copilot.ts` (unchanged).
+ * OAuth uses refresh ?? access directly, including former OpenCode-app tokens;
+ * no expiry-triggered exchange or forced migration. Newly minted tokens double
+ * as access/refresh, with the existing ten-year expiry and enterprise identity.
+ * PATs retain the documented billing connector and internal-quota fallback.
+ * Enterprise login uses inputs.enterpriseHost; usage keeps http(s) URLs
+ * verbatim, api.* hosts intact, otherwise prefixes api., default api.github.com.
  *
- * Device login is hand-ported from OMP
- * `packages/ai/src/registry/oauth/github-copilot.ts`
- * @ 8500092296621a6826b7136e840f8a59ea338958.
- *
- * Kept from the OMP sources:
- * - OpenCode-owned GitHub OAuth App client id (verbatim).
- * - Device-code and access-token endpoints on github.com (or an enterprise
- *   host), JSON POST bodies (`client_id` + `scope: "read:user"`; then
- *   `device_code` + `grant_type=urn:ietf:params:oauth:grant-type:device_code`),
- *   `Accept`/`Content-Type: application/json` plus the OpenCode User-Agent.
- * - The OMP polling cadence: deadline = now + expires_in; wait FIRST for
- *   min(ceil(interval x 1.2), remaining) with a 1000ms floor and 1000ms
- *   scale; `authorization_pending` keeps polling; `slow_down` switches the
- *   interval to the response's seconds (or +5s when absent) and the
- *   multiplier to 1.4; the deadline expiry yields "Device flow timed out"
- *   (clock-drift variant after any slow_down).
- * - The minted credential mirrors OMP's OAuthCredentials: the GitHub token
- *   doubles as access and refresh with a 10-year far-future expiry and the
- *   normalized enterprise domain as identity.
- * - The quota route (OMP fetchInternalUsage + normalizeQuotaSnapshots +
- *   buildLimitFromQuota + deriveStatus): Bearer refresh??access with JSON
- *   accepts and the OpenCode User-Agent on /copilot_internal/user; premium /
- *   chat / completions snapshots become copilot:{premium,chat,completions}
- *   request windows (chat/completions only when not unlimited); used =
- *   max(0, entitlement - remaining), limit = entitlement, fraction =
- *   used/limit (nil when unlimited or unknown), resetsAtMs from
- *   quota_reset_date; unlimited -> ok, no fraction -> unknown,
- *   remainingFraction <= 0 -> exhausted, <= 0.1 -> warning, else ok.
- * - The GitHub API base URL resolves from identity.enterpriseUrl exactly
- *   like OMP resolveGitHubApiBaseUrl (http(s) verbatim, api.* host kept,
- *   else api. prefix; default https://api.github.com).
- *
- * Deviations from the OMP sources (with reasons):
- * - Enterprise host comes from `LoginInputs.enterpriseHost` because bridge
- *   login is non-interactive over the duplex session (OMP prompts with
- *   onPrompt); the bridge never reads /dev/tty.
- * - OMP resolves the login username and calls the copilot_internal endpoint
- *   discovery + model-policy enablement after login; those feed OMP's model
- *   catalog and metadata surfaces, which the bridge does not have, so login
- *   mints the credential and stops.
- * - OMP's null-report outcomes become typed BridgeErrors (HTTP failures via
- *   callProviderHttp's status map, a non-object body -> malformedPayload, no
- *   usable snapshots -> noData); OMP UsageLimit scope/metadata/raw, notes
- *   (overage counts) and window labels have no bridge surface.
- * - OMP's OAuth supports() gate (refreshToken || accessToken) becomes
- *   missingCredential when neither is present.
- * - The OMP `pollIntervalFloorMs`/`pollIntervalScaleMs` test knobs become
- *   injectable now/sleep dependencies (defaults pinned to OMP's 1000/1000);
- *   the scheduler wait keeps OMP's abort-on-signal semantics, so every
- *   request and wait is deadline-abortable end to end.
+ * Deliberate bridge differences: no model discovery/policy/catalog calls;
+ * typed errors instead of null reports; shared wire severity bands, not OMP's
+ * ladder. Unlimited snapshots have no measurable utilization and are omitted
+ * (including premium); an entirely unmetered response is typed noData. Login
+ * waits and requests retain the existing abortable cadence/race and injected
+ * clock/sleep seams. No OMP runtime or shared credential-store dependency.
  */
 
 import { scheduler } from "node:timers/promises";
@@ -66,17 +29,17 @@ import { fetchGitHubCopilotUsage } from "../connectors/github-copilot";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
 import type { BridgeCredential, BridgeSuccessResponse, UsageReport, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "github-copilot";
 const CONNECTOR_VERSION = "github-copilot-1";
 
-/** OpenCode-owned GitHub OAuth App client id, copied verbatim from OMP github-copilot.ts @ 8500092. */
-const CLIENT_ID = "Ov23li8tweQw6odWQebz";
+/** Official Copilot CLI OAuth app; existing credentials keep their original clientId. */
+const CLIENT_ID = "Ov23ctDVkRmgkPke0Mmm";
 
-/** `OPENCODE_HEADERS.User-Agent` from packages/catalog/src/wire/github-copilot.ts @ 8500092. */
-const OPENCODE_USER_AGENT = "opencode/1.3.15";
+/** COPILOT_GITHUB_HEADERS from the pinned catalog wire source (not CAPI headers). */
+const COPILOT_GITHUB_USER_AGENT = "copilot/1.0.82";
 
 const DEVICE_SCOPE = "read:user";
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
@@ -97,10 +60,10 @@ const FAR_FUTURE_MS = 10 * 365.25 * 24 * 60 * 60 * 1000;
 /** OMP default GitHub API base for the quota route. */
 const DEFAULT_GITHUB_API_BASE = "https://api.github.com";
 
-const JSON_HEADERS: Readonly<Record<string, string>> = {
+const OAUTH_HEADERS: Readonly<Record<string, string>> = {
   Accept: "application/json",
-  "Content-Type": "application/json",
-  "User-Agent": OPENCODE_USER_AGENT,
+  "Content-Type": "application/x-www-form-urlencoded",
+  "User-Agent": "copilot-developer-action/0.0.1",
 };
 
 export type GitHubCopilotLoginDeps = {
@@ -325,8 +288,8 @@ async function requestDeviceCode(domain: string, fetcher: Fetcher, signal: Abort
     call: {
       url: getUrls(domain).deviceCodeUrl,
       method: "POST",
-      headers: { ...JSON_HEADERS },
-      body: JSON.stringify({ client_id: CLIENT_ID, scope: DEVICE_SCOPE }),
+      headers: { ...OAUTH_HEADERS },
+      body: new URLSearchParams({ client_id: CLIENT_ID, scope: DEVICE_SCOPE }).toString(),
     },
     fetcher,
     signal,
@@ -366,12 +329,12 @@ async function pollDeviceToken(
     call: {
       url: accessTokenUrl,
       method: "POST",
-      headers: { ...JSON_HEADERS },
-      body: JSON.stringify({
+      headers: { ...OAUTH_HEADERS },
+      body: new URLSearchParams({
         client_id: CLIENT_ID,
         device_code: deviceCode,
         grant_type: DEVICE_CODE_GRANT_TYPE,
-      }),
+      }).toString(),
     },
     fetcher,
     signal,
@@ -511,24 +474,6 @@ function parseCopilotQuotaDetail(value: unknown): CopilotQuotaDetail | null {
   return { entitlement, remaining, unlimited };
 }
 
-/** OMP deriveStatus via remainingFraction. */
-function copilotQuotaSeverity(quota: CopilotQuotaDetail, usedFraction: number | undefined): UsageWindow["severity"] {
-  if (quota.unlimited) {
-    return "ok";
-  }
-  if (usedFraction === undefined) {
-    return "unknown";
-  }
-  const remainingFraction = Math.max(0, 1 - usedFraction);
-  if (remainingFraction <= 0) {
-    return "exhausted";
-  }
-  if (remainingFraction <= 0.1) {
-    return "warning";
-  }
-  return "ok";
-}
-
 /** OMP buildLimitFromQuota mapped onto a bridge UsageWindow. */
 function buildCopilotQuotaWindow(args: {
   readonly id: string;
@@ -545,7 +490,7 @@ function buildCopilotQuotaWindow(args: {
     label: args.label,
     unit: "requests",
     ...(resolvedFraction !== undefined ? { resolvedFraction } : {}),
-    severity: copilotQuotaSeverity(args.quota, resolvedFraction),
+    severity: severityForFraction(resolvedFraction),
     ...(used !== undefined ? { used } : {}),
     ...(limit !== undefined ? { limit } : {}),
     ...(args.resetsAtMs !== undefined ? { resetsAtMs: args.resetsAtMs } : {}),
@@ -581,7 +526,7 @@ async function fetchCopilotQuotaUsage(
   const signal = AbortSignal.timeout(Math.max(1, input.request.deadlineAtMs - input.nowMs));
   const baseUrl = resolveCopilotApiBaseUrl(oauth?.identity);
 
-  // OMP fetchInternalUsage: Bearer token, JSON accepts, OpenCode UA.
+  // GitHub REST quota headers, deliberately separate from OAuth and billing.
   const response = await callProviderHttp({
     call: {
       url: `${baseUrl}/copilot_internal/user`,
@@ -590,7 +535,7 @@ async function fetchCopilotQuotaUsage(
         "Content-Type": "application/json",
         Accept: "application/json",
         Authorization: `Bearer ${token}`,
-        "User-Agent": OPENCODE_USER_AGENT,
+        "User-Agent": COPILOT_GITHUB_USER_AGENT,
       },
     },
     fetcher: input.fetcher,
@@ -611,7 +556,7 @@ async function fetchCopilotQuotaUsage(
   const snapshots = isRecord(data["quota_snapshots"]) ? data["quota_snapshots"] : {};
   const windows: UsageWindow[] = [];
   const premium = parseCopilotQuotaDetail(snapshots["premium_interactions"]);
-  if (premium !== null) {
+  if (premium !== null && !premium.unlimited) {
     windows.push(buildCopilotQuotaWindow({ id: "copilot:premium", label: "Premium Requests", quota: premium, resetsAtMs }));
   }
   const chat = parseCopilotQuotaDetail(snapshots["chat"]);

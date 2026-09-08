@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import usedOnlyPayload from "../fixtures/cursor/used-only.json";
 import { cursorAuth, cursorConnector, extractCursorAccessTokenUserId, loginCursor, refreshCursorCredential } from "../src/providers/cursor";
 import { BridgeError } from "../src/protocol";
 import type { BridgeCredential, BridgeRequest, UsageWindow } from "../src/protocol";
@@ -37,7 +38,7 @@ function dashboardCookie(token: string): string {
   return `WorkosCursorSessionToken=${encodeURIComponent(`user-789::${token}`)}`;
 }
 
-/** /auth/usage payload: legacy request/USD buckets plus an unusable row. */
+/** /auth/usage payload: legacy request/USD buckets plus a used-only row. */
 const AUTH_USAGE_BODY = {
   startOfMonth: "2026-08-01T00:00:00.000Z",
   coreRequests: { numRequests: 120, maxRequestUsage: 500 },
@@ -76,6 +77,14 @@ const EXPECTED_WINDOWS: readonly UsageWindow[] = [
     severity: "ok",
     used: 2400,
     limit: 20000,
+    resetsAtMs: SEP_1_MS,
+  },
+  {
+    id: "cursor:requests:cacherequests",
+    label: "cacheRequests requests",
+    unit: "requests",
+    used: 10,
+    severity: "unknown",
     resetsAtMs: SEP_1_MS,
   },
   {
@@ -254,6 +263,7 @@ describe("cursorConnector — usage mapping over the exact upstream calls", () =
     expect(response.report.windows.map((window) => window.id)).toEqual([
       "cursor:requests:corerequests",
       "cursor:usd:planusage",
+      "cursor:requests:cacherequests",
     ]);
   });
 
@@ -312,6 +322,7 @@ describe("cursorConnector — usage mapping over the exact upstream calls", () =
     expect(response.report.windows.map((window) => window.id)).toEqual([
       "cursor:requests:corerequests",
       "cursor:usd:planusage",
+      "cursor:requests:cacherequests",
     ]);
   });
 });
@@ -820,6 +831,87 @@ describe("cursorAuth — refresh", () => {
       refreshCursorCredential({ kind: "bearer", secret: ACCESS_TOKEN }, AbortSignal.timeout(1000), mockFetcher([])),
     );
     expect(error.kind).toBe("invalidRequest");
+  });
+});
+
+describe("cursorConnector - capless quota and closed-wire controls", () => {
+  test("retains raw requests/USD and zero usage without invented caps or fractions", async () => {
+    const fetcher = mockFetcher({ [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: usedOnlyPayload } });
+    const response = await cursorConnector.fetchUsage({ request: usageRequest({ credential: { kind: "bearer", secret: ACCESS_TOKEN } }), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows).toEqual([
+      { id: "cursor:requests:corerequests", label: "coreRequests requests", unit: "requests", used: 42.5, severity: "unknown", resetsAtMs: SEP_1_MS },
+      { id: "cursor:usd:planusage", label: "planUsage spend", unit: "usd", used: 12.75, severity: "unknown", resetsAtMs: SEP_1_MS },
+      { id: "cursor:requests:zerorequests", label: "zeroRequests requests", unit: "requests", used: 0, severity: "unknown", resetsAtMs: SEP_1_MS },
+    ]);
+    expect(fetcher.calls).toHaveLength(1);
+    expectNoModelFields(response);
+  });
+  for (const alias of ["numRequests", "used", "amountUsed", "usdUsed"]) {
+    for (const cap of [undefined, null]) {
+      test(`retains ${alias} with ${cap === null ? "null" : "absent"} cap`, async () => {
+        const fetcher = mockFetcher({ [`GET ${AUTH_USAGE_URL}`]: { status: 200,
+          body: { requests: { [alias]: "42.5", ...(cap === null ? { maxRequestUsage: null } : {}) } } } });
+        const response = await cursorConnector.fetchUsage({ request: usageRequest({ credential: { kind: "bearer", secret: ACCESS_TOKEN } }), fetcher, nowMs: NOW_MS });
+        expect(response.report.windows).toEqual([
+          { id: "cursor:requests:requests", label: "requests requests", unit: "requests", used: 42.5, severity: "unknown" },
+        ]);
+      });
+    }
+  }
+  for (const [used, severity] of [[0, "ok"], [79.9, "ok"], [80, "warning"], [87.5, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"], [125, "exhausted"]] as const) {
+    test(`uses shared wire severity for bounded ${used}% legacy and dashboard windows`, async () => {
+      const fetcher = mockFetcher({
+        [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: { requests: { used, limit: 100 } } },
+        [`GET ${USAGE_SUMMARY_URL}`]: { status: 200, body: { individualUsage: { plan: { autoPercentUsed: used } } } },
+      });
+      const response = await cursorConnector.fetchUsage({ request: usageRequest({ credential: oauthCredential({ expiresAtMs: NOW_MS + 3_600_000 }) }), fetcher, nowMs: NOW_MS });
+      expect(response.report.windows.map(window => [window.resolvedFraction, window.severity])).toEqual([[used / 100, severity], [used / 100, severity]]);
+    });
+  }
+  for (const payload of [null, [], "", {}, { requests: {} }, { requests: { used: null } },
+    { requests: { used: "" } }, { requests: { used: "NaN" } }, { requests: { used: "Infinity" } },
+    { requests: { used: -1 } }, { requests: { used: 42, limit: "bad" } },
+    { requests: { used: 42, limit: 0 } }, { requests: { used: 42, limit: -1 } },
+    { requests: { used: 1e308, limit: 1e-308 } }]) {
+    test(`returns noData for unusable legacy input ${JSON.stringify(payload)}`, async () => {
+      const fetcher = mockFetcher({ [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: payload } });
+      const error = await bridgeErrorFrom(() => cursorConnector.fetchUsage({ request: usageRequest({ credential: { kind: "bearer", secret: ACCESS_TOKEN } }), fetcher, nowMs: NOW_MS }));
+      expect(error.kind).toBe("noData");
+    });
+  }
+  test("retains valid rows beside malformed rows and honors numeric cap aliases", async () => {
+    const fetcher = mockFetcher({ [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: {
+      requests: { numRequests: "invalid", amountUsed: "80", maxRequestUsage: null, amountLimit: "100" },
+      capless: { used: 42.5 }, negative: { used: -1 }, invalidCap: { used: 42, limit: "bad" },
+    } } });
+    const response = await cursorConnector.fetchUsage({ request: usageRequest({ credential: { kind: "bearer", secret: ACCESS_TOKEN } }), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(window => [window.id, window.used, window.limit, window.severity])).toEqual([
+      ["cursor:requests:requests", 80, 100, "warning"], ["cursor:requests:capless", 42.5, undefined, "unknown"],
+    ]);
+  });
+  test("keeps capless dashboard cents and rotated credentials with used-only legacy usage", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${REFRESH_URL}`]: { status: 200, body: { accessToken: NEW_TOKEN } },
+      [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: { requests: { used: 42.5, limit: null } } },
+      [`GET ${USAGE_SUMMARY_URL}`]: { status: 200, body: { individualUsage: { overall: { used: 1250, limit: null } } } },
+    });
+    const response = await cursorConnector.fetchUsage({ request: usageRequest({ credential: oauthCredential() }), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(window => [window.used, window.limit, window.resolvedFraction, window.severity])).toEqual([
+      [42.5, undefined, undefined, "unknown"], [12.5, undefined, undefined, "unknown"],
+    ]);
+    expect(response.refreshedCredential?.kind === "oauth" ? response.refreshedCredential.oauth.refresh : undefined).toBe("login-refresh");
+    expect(new Headers(fetcher.calls[1]?.init.headers).get("Authorization")).toBe(`Bearer ${NEW_TOKEN}`);
+    expect(new Headers(fetcher.calls[2]?.init.headers).get("Cookie")).toBe(dashboardCookie(NEW_TOKEN));
+  });
+  test("preserves rotation when malformed legacy usage and empty summary leave no usable rows", async () => {
+    const fetcher = mockFetcher({
+      [`POST ${REFRESH_URL}`]: { status: 200, body: { accessToken: NEW_TOKEN, refreshToken: "new-refresh" } },
+      [`GET ${AUTH_USAGE_URL}`]: { status: 200, body: { requests: { used: -1, limit: 100 } } },
+      [`GET ${USAGE_SUMMARY_URL}`]: { status: 200, body: {} },
+    });
+    const error = await bridgeErrorFrom(() => cursorConnector.fetchUsage({ request: usageRequest({ credential: oauthCredential() }), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
+    expect(error.refreshedCredential?.kind === "oauth" ? error.refreshedCredential.oauth.refresh : undefined).toBe("new-refresh");
   });
 });
 

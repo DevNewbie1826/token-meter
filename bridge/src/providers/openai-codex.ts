@@ -73,7 +73,17 @@
  *   explicitly allows (allowed=true && limit_reached=false) — >=0.9 warning,
  *   else ok, unknown without a percent.
  *
+ * Identity fallback updated from registry/oauth/openai-codex.ts at
+ * d720e81fb747132f0b6c6c0f44eafc887552ec7f; no inference/transport migration.
+ *
  * Deviations from the OMP sources (with reasons):
+ * - Severity uses the shared wire bands (warning >=0.8, critical >=0.95,
+ *   exhausted >=1), even when upstream flags explicitly allow further use.
+ *   Swift validates severity against the fraction, not those metadata flags.
+ * - JWT identity is decoded, not signature/issuer/audience verified. It is
+ *   workspace/display metadata, not proof of a verified email or identity.
+ *   Usable access claims take precedence; unusable claims fall back to the ID token.
+ *   Refresh preserves the entire login identity instead of re-inferring it.
  * - The loopback listener binds a single 127.0.0.1 socket (the shared
  *   ../auth/loopback module) where OMP's `localhost` flows bind both the
  *   IPv4 and IPv6 loopback families; the advertised redirect stays
@@ -129,13 +139,12 @@ import { rethrowWithRefreshedCredential } from "../auth/refresh";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
 import type {
   BridgeCredential,
   BridgeRequest,
   BridgeSuccessResponse,
   OAuthCredential,
-  Severity,
   UsageReport,
   UsageWindow,
 } from "../protocol";
@@ -198,18 +207,33 @@ function toNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-type CodexJwtPayload = {
-  readonly [JWT_CLAIM_PATH]?: { readonly chatgpt_account_id?: string; readonly chatgpt_plan_type?: string };
-  readonly [JWT_PROFILE_CLAIM]?: { readonly email?: string };
+type CodexTokenProfile = {
+  readonly accountId: string | undefined;
+  readonly email: string | undefined;
+  readonly planType: string | undefined;
 };
 
-/** OMP decodeJwt (registry/oauth/openai-codex.ts): base64 JWT payload claim decode. */
-function decodeCodexJwt(token: string): CodexJwtPayload | null {
+function profileString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/** Decode unverified JWT metadata, parsing only usable profile strings. */
+function decodeCodexJwt(token: string): CodexTokenProfile | null {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     const payload = parts[1] ?? "";
-    return JSON.parse(Buffer.from(payload, "base64").toString("utf-8")) as CodexJwtPayload;
+    const decoded: unknown = JSON.parse(Buffer.from(payload, "base64").toString("utf-8"));
+    if (!isRecord(decoded)) return null;
+    const auth = isRecord(decoded[JWT_CLAIM_PATH]) ? decoded[JWT_CLAIM_PATH] : undefined;
+    const profile = isRecord(decoded[JWT_PROFILE_CLAIM]) ? decoded[JWT_PROFILE_CLAIM] : undefined;
+    return {
+      accountId: profileString(auth?.["chatgpt_account_id"]),
+      email: profileString(profile?.["email"])?.toLowerCase(),
+      planType: profileString(auth?.["chatgpt_plan_type"])?.toLowerCase(),
+    };
   } catch {
     return null;
   }
@@ -217,23 +241,18 @@ function decodeCodexJwt(token: string): CodexJwtPayload | null {
 
 /**
  * OMP getTokenProfile: the ChatGPT workspace id, email and plan type decoded
- * from the access token (plan type may also ride the id token).
+ * from unverified access claims, falling back field-wise to the ID token.
  */
 function getTokenProfile(
   accessToken: string,
   idToken?: string,
-): { accountId?: string | undefined; email?: string | undefined; planType?: string | undefined } {
+): CodexTokenProfile {
   const payload = decodeCodexJwt(accessToken);
   const idPayload = idToken !== undefined ? decodeCodexJwt(idToken) : null;
-  const auth = payload?.[JWT_CLAIM_PATH];
-  const idAuth = idPayload?.[JWT_CLAIM_PATH];
-  const accountId = auth?.chatgpt_account_id;
-  const email = payload?.[JWT_PROFILE_CLAIM]?.email?.trim().toLowerCase();
-  const planType = (auth?.chatgpt_plan_type ?? idAuth?.chatgpt_plan_type)?.trim().toLowerCase();
   return {
-    accountId: typeof accountId === "string" && accountId.length > 0 ? accountId : undefined,
-    email: typeof email === "string" && email.length > 0 ? email : undefined,
-    planType: typeof planType === "string" && planType.length > 0 ? planType : undefined,
+    accountId: payload?.accountId ?? idPayload?.accountId,
+    email: payload?.email ?? idPayload?.email,
+    planType: payload?.planType ?? idPayload?.planType,
   };
 }
 
@@ -408,17 +427,6 @@ function resolveResetTimeMs(window: ParsedUsageWindow, nowMs: number): number | 
   return undefined;
 }
 
-/**
- * OMP buildUsageStatus: unknown without a fraction; >=1 exhausted unless the
- * meter still explicitly allows (then warning); >=0.9 warning; else ok.
- */
-function codexSeverity(usedFraction: number | undefined, explicitlyAllowed: boolean): Severity {
-  if (usedFraction === undefined) return "unknown";
-  if (usedFraction >= 1) return explicitlyAllowed ? "warning" : "exhausted";
-  if (usedFraction >= 0.9) return "warning";
-  return "ok";
-}
-
 /** One bridge UsageWindow per OMP-normalized Codex limit. */
 function buildCodexWindow(args: {
   readonly id: string;
@@ -456,7 +464,7 @@ function buildCodexWindow(args: {
     label,
     unit: "percent",
     resolvedFraction: usedFraction,
-    severity: codexSeverity(usedFraction, args.allowed === true && args.limitReached === false),
+    severity: severityForFraction(usedFraction),
     used: clamped,
     limit: 100,
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),

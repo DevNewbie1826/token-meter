@@ -227,7 +227,7 @@ describe("minimaxCodeConnector", () => {
     expect(response.report.windows.find((window) => window.id === "general:7d")).toMatchObject({
       used: 95,
       resolvedFraction: 0.95,
-      severity: "warning",
+      severity: "critical",
     });
     expect(response.report.windows.find((window) => window.id === "video:24h")).toMatchObject({
       used: 0,
@@ -417,5 +417,13 @@ describe("minimaxCodeAuth", () => {
     expect(cancelled.message.toLowerCase()).toContain("cancelled");
     expect(cancelled.message).not.toContain(API_KEY);
     expect(fetcher.calls).toHaveLength(0);
+  });
+});
+
+describe("MiniMax wire conformance", () => {
+  test.each([[79.9, "ok"], [80, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"]] as const)("uses wire severity at %s percent", async (percent, severity) => {
+    const response = await runFetch(mockFetcher({ [`GET ${REMAINS_URL}`]: { status: 200, body: remainsPayload(generalBucket({ current_interval_remaining_percent: 100 - percent })) } }));
+    expect(response.report.windows[0]?.resolvedFraction).toBeCloseTo(percent / 100, 12);
+    expect(response.report.windows[0]?.severity).toBe(severity);
   });
 });
