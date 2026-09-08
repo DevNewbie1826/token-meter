@@ -140,17 +140,44 @@ export function mockFetcher(
 }
 
 /**
- * Resolves once `getCount()` reports at least `count`. Each hop yields one
- * macrotask, which deterministically drains every pending microtask first —
- * no wall-clock timing dependence.
+ * Subscribe before triggering the producer, which dispatches "ready" only after
+ * registering both the counted item and its response handler. Checks the current
+ * count on subscription and on that exact event, never by polling.
  */
-export async function waitForCount(getCount: () => number, count: number): Promise<void> {
-  for (let hop = 0; hop < 50 && getCount() < count; hop += 1) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  }
-  if (getCount() < count) {
-    throw new Error(`expected a count of at least ${count}, saw ${getCount()}`);
-  }
+export function waitForCount(
+  getCount: () => number,
+  count: number,
+  ready: EventTarget,
+  options: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {},
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      ready.removeEventListener("ready", onReady);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const onReady = (): void => {
+      if (getCount() >= count) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(options.signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`expected a count of at least ${count}, saw ${getCount()}`));
+    }, options.timeoutMs ?? 1000);
+    ready.addEventListener("ready", onReady);
+    options.signal?.addEventListener("abort", onAbort);
+    if (options.signal?.aborted) {
+      onAbort();
+    } else {
+      onReady();
+    }
+  });
 }
 
 /**
