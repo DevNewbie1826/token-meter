@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { loginZai, zaiAuth, zaiConnector } from "../src/providers/zai";
 import { BridgeError } from "../src/protocol";
+import credits from "../fixtures/zai/credits.json";
+import mixed from "../fixtures/zai/mixed.json";
+import precision from "../fixtures/zai/precision.json";
 import type { BridgeRequest, UsageWindow } from "../src/protocol";
 import type { AuthEvent, AuthEvents } from "../src/dispatch";
-import { buildLoginRequest, buildUsageRequest, expectLoopbackClosed, expectNoModelFields, mockFetcher, waitForCount } from "./helpers";
+import { buildLoginRequest, buildUsageRequest, expectNoModelFields, mockFetcher, waitForCount } from "./helpers";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -241,6 +244,17 @@ function eventCollector(): {
 // ---------------------------------------------------------------------------
 
 describe("zaiConnector — quota mapping", () => {
+  test.each([
+    ["credits", credits, [1438 / 12000, 0.95], ["credits", "credits"]],
+    ["mixed", mixed, [0.8, 0.7999, 0.9499, 0.9999], ["credits", "tokens", "requests", "credits"]],
+    ["precision", precision, [0.7999, 1.01], ["tokens", "requests"]],
+  ] as const)("latest %s payload preserves precise independent meters", async (_name, body, fractions, units) => {
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body } });
+    const response = await zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(window => window.resolvedFraction)).toEqual([...fractions]);
+    expect(response.report.windows.map(window => window.unit)).toEqual([...units]);
+  });
+
   test("maps the OMP quota payload to normalized windows over the exact upstream call", async () => {
     const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: QUOTA_BODY } });
     const request = zaiUsageRequest();
@@ -301,6 +315,42 @@ describe("zaiConnector — quota mapping", () => {
     const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: QUOTA_BODY } });
     const response = await zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS });
     expect(JSON.stringify(response)).not.toContain(RAW_KEY);
+  });
+
+  test("credits without absolute pairs retain percentage fallback and remaining-only units", async () => {
+    const limits = [
+      { type: "CREDIT_LIMIT", percentage: "80", unit: 3 },
+      { type: "CREDIT_LIMIT", currentValue: "1438", usage: "12000", percentage: 11, unit: 6 },
+      { type: "CREDIT_LIMIT", remaining: "25", unit: 5 },
+    ];
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: { status: 200, body: { success: true, data: { limits } } } });
+    const response = await zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS });
+    expect(response.report.windows.map(window => window.unit)).toEqual(["credits", "credits", "credits"]);
+    expect(response.report.windows.map(window => window.resolvedFraction)).toEqual([0.8, 1438 / 12000, undefined]);
+    expect(response.report.windows.map(window => window.severity)).toEqual(["warning", "ok", "unknown"]);
+    expect(response.report.windows[2]?.remaining).toBe(25);
+  });
+
+  test.each([
+    { currentValue: -1, usage: 100 },
+    { currentValue: 1, usage: 0, percentage: 50 },
+    { currentValue: 1e308, usage: 1e-308 },
+    { currentValue: 80, usage: 100, remaining: 30 },
+    { remaining: -1 },
+  ])("malformed credit amounts become typed errors rather than invalid Swift reports: %j", async amounts => {
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: {
+      status: 200, body: { success: true, data: { limits: [{ type: "CREDIT_LIMIT", ...amounts }] } },
+    } });
+    const error = await bridgeErrorFrom(() => zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("malformedPayload");
+  });
+
+  test("empty credit rows do not fabricate a usable report", async () => {
+    const fetcher = mockFetcher({ [`GET ${QUOTA_URL}`]: {
+      status: 200, body: { success: true, data: { limits: [{ type: "CREDIT_LIMIT" }] } },
+    } });
+    const error = await bridgeErrorFrom(() => zaiConnector.fetchUsage({ request: zaiUsageRequest(), fetcher, nowMs: NOW_MS }));
+    expect(error.kind).toBe("noData");
   });
 });
 
@@ -503,12 +553,8 @@ const CUSTOMER_BODY = {
 };
 
 /**
- * Runs the browser flow end-to-end against mocked endpoints + a real loopback.
- *
- * Upstream mock calls are gated until the loopback response has fully
- * drained: the module stops the callback server in its `finally` (the
- * loopback's stop(true) closes live sockets), so letting the mint race the
- * response read would make the callback fetch fail with ECONNRESET.
+ * Runs the actual browser entry with a controlled App-style openUrl consumer
+ * and duplex paste. Only the external HTTP boundary is replaced.
  */
 async function runBrowserFlow(
   routes: Parameters<typeof mockFetcher>[0],
@@ -520,47 +566,60 @@ async function runBrowserFlow(
   readonly authorizeUrl: URL;
   readonly redirectUri: string;
 }> {
-  const innerFetcher = mockFetcher(routes);
-  const callbackDrained = Promise.withResolvers<void>();
-  const fetcher = (url: string, init: RequestInit): Promise<Response> =>
-    callbackDrained.promise.then(() => innerFetcher(url, init));
+  const fetcher = mockFetcher(routes);
   const collector = eventCollector();
   const openedUrls: string[] = [];
   const controller = new AbortController();
 
-  const loginPromise = loginZai("browser", {}, collector.events, controller.signal, {
-    fetcher,
-    openBrowser: (url) => {
-      openedUrls.push(url);
-    },
-  });
-
-  const openUrlEvent = await collector.waitFor("openUrl");
-  if (openUrlEvent.type !== "openUrl") {
-    throw new Error("expected an openUrl event");
+  let authorizeUrl: URL | undefined;
+  let redirectUri: string | undefined;
+  try {
+    const result = await loginZai("browser", {}, {
+      onEvent: event => {
+        collector.events.onEvent(event);
+        if (event.type === "openUrl") {
+          // Same surface as the App's browser opener, without OS side effects.
+          openedUrls.push(event.url);
+          authorizeUrl = new URL(event.url);
+          redirectUri = authorizeUrl.searchParams.get("redirect_uri") ?? undefined;
+        }
+      },
+      requestInput: async prompt => {
+        expect(prompt.inputKind).toBe("redirectUrl");
+        expect(prompt.sensitive).toBe(true);
+        expect(fetcher.calls).toHaveLength(0);
+        const state = authorizeUrl?.searchParams.get("state");
+        if (redirectUri === undefined || !state) throw new Error("missing callback parameters");
+        return `${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`;
+      },
+    }, controller.signal, {
+      fetcher,
+      openBrowser: () => { throw new Error("provider must not double-open the browser"); },
+    });
+    if (authorizeUrl === undefined || redirectUri === undefined) throw new Error("missing authorize event");
+    return { result, fetcher, collector, openedUrls, authorizeUrl, redirectUri };
+  } finally {
+    controller.abort();
   }
-  const authorizeUrl = new URL(openUrlEvent.url);
-  const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
-  if (redirectUri === null) {
-    throw new Error("authorize URL carries no redirect_uri");
-  }
-
-  // Complete the loopback callback over the real local server, then let the
-  // upstream mocks run only once the callback response has been consumed.
-  const state = authorizeUrl.searchParams.get("state");
-  if (state === null) {
-    throw new Error("authorize URL carries no state");
-  }
-  const callbackResponse = await fetch(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
-  expect(callbackResponse.status).toBe(200);
-  await callbackResponse.text();
-  callbackDrained.resolve();
-
-  const result = await loginPromise;
-  return { result, fetcher: innerFetcher, collector, openedUrls, authorizeUrl, redirectUri };
 }
 
 describe("zaiAuth — browser method", () => {
+  test("latest authorize request uses only the allowlisted custom callback", async () => {
+    const collector = eventCollector();
+    const controller = new AbortController();
+    const opened = collector.waitFor("openUrl");
+    const login = loginZai("browser", {}, collector.events, controller.signal, { fetcher: mockFetcher([]) });
+    const outcome = Promise.allSettled([login]);
+    try {
+      const event = await opened;
+      if (event.type !== "openUrl") throw new Error("expected browser URL");
+      expect(new URL(event.url).searchParams.get("redirect_uri")).toBe("zcode://zai-auth/callback");
+    } finally {
+      controller.abort();
+      await outcome;
+    }
+  });
+
   test("mints the durable id.secret key through the full ZCode-like flow", async () => {
     const { result, fetcher, collector, openedUrls, authorizeUrl, redirectUri } = await runBrowserFlow({
       [`POST ${TOKEN_URL}`]: { status: 200, body: TOKEN_BODY },
@@ -571,16 +630,16 @@ describe("zaiAuth — browser method", () => {
     });
 
     // Authorize URL: chat.z.ai, ZCode client id, response_type=code, the
-    // actual loopback redirect_uri, 32-hex state and NO PKCE challenge.
+    // allowlisted custom redirect_uri, 32-hex state and NO PKCE challenge.
     expect(authorizeUrl.origin).toBe("https://chat.z.ai");
     expect(authorizeUrl.pathname).toBe("/api/oauth/authorize");
     expect(authorizeUrl.searchParams.get("client_id")).toBe("client_P8X5CMWmlaRO9gyO-KSqtg");
     expect(authorizeUrl.searchParams.get("response_type")).toBe("code");
     expect(authorizeUrl.searchParams.get("redirect_uri")).toBe(redirectUri);
-    expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/);
+    expect(redirectUri).toBe("zcode://zai-auth/callback");
     expect(authorizeUrl.searchParams.get("state")).toMatch(/^[0-9a-f]{32}$/);
     expect(authorizeUrl.searchParams.has("code_challenge")).toBe(false);
-    expect(openedUrls).toEqual([]);
+    expect(openedUrls).toEqual([authorizeUrl.toString()]);
 
     // Events: openUrl, the OMP paste-fallback hint, and progress events.
     expect(collector.received().some((event) => event.type === "pasteHint")).toBe(true);
@@ -689,11 +748,17 @@ describe("zaiAuth — browser method", () => {
     const fetcher = mockFetcher([]);
     const collector = eventCollector();
     const controller = new AbortController();
-    const loginPromise = loginZai("browser", {}, collector.events, controller.signal, {
+    const opened = collector.waitFor("openUrl");
+    const loginPromise = loginZai("browser", {}, {
+      ...collector.events,
+      requestInput: (_prompt, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+    }, controller.signal, {
       fetcher,
       openBrowser: () => undefined,
     });
-    await collector.waitFor("openUrl");
+    await opened;
     controller.abort(new Error("user closed the browser"));
 
     const error = await bridgeErrorFrom(() => loginPromise);
@@ -790,7 +855,7 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
     pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
     const result = await loginPromise;
     expect(pastes.pendingResponses()).toBe(0);
-    await expectLoopbackClosed(redirectUri);
+    expect(redirectUri).toBe("zcode://zai-auth/callback");
 
     expect(pastes.prompts()).toEqual([{ inputKind: "redirectUrl", sensitive: true }]);
     // The mint ran to completion over the pasted code: exactly the 5 upstream
@@ -843,11 +908,11 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
       // Drain the login even when a readiness assertion/timeout fails.
       await Promise.allSettled([loginPromise, retryReady]);
       expect(pastes.pendingResponses()).toBe(0);
-      await expectLoopbackClosed(redirectUri);
+      expect(redirectUri).toBe("zcode://zai-auth/callback");
     }
   });
 
-  test("cancellation while a paste is pending closes the loopback listener", async () => {
+  test("cancellation while a manual-only paste is pending drains the prompt", async () => {
     const collector = eventCollector();
     const pastes = pasteCollector(collector);
     const controller = new AbortController();
@@ -869,7 +934,7 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
     const error = await bridgeErrorFrom(() => loginPromise);
     expect(error.kind).toBe("timeout");
     expect(error.message).toContain("cancel");
-    await expectLoopbackClosed(redirectUri);
+    expect(redirectUri).toBe("zcode://zai-auth/callback");
   });
 });
 

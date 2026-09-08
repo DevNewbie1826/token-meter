@@ -1,0 +1,4 @@
+{"buckets":[
+  {"bucketId":"remaining-positive","displayName":"Remaining quota","remainingAmount":"42.5"},
+  {"bucketId":"remaining-zero","remainingAmount":0}
+]}

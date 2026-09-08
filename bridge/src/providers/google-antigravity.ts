@@ -1,64 +1,16 @@
 /**
- * Google Antigravity provider module (browser auth + usage connector),
- * hand-ported from the pinned oh-my-pi checkout
- * @ 8500092296621a6826b7136e840f8a59ea338958:
- *
- * - packages/ai/src/registry/oauth/google-antigravity.ts  (client creds,
- *   project discovery/provisioning, token refresh)
- * - packages/ai/src/registry/oauth/google-oauth-shared.ts  (authorization-
- *   code + loopback login shape, user email lookup, 30s request timeout)
- * - packages/ai/src/usage/google-antigravity.ts            (quota fetch +
- *   per-backend-counter percent normalization)
- * - packages/catalog/src/wire/gemini-headers.ts             (Antigravity
- *   User-Agent constants and version defaults)
- *
- * Kept from the OMP sources (same endpoints, client ids/secrets, request
- * bodies and normalization boundaries):
- * - Login: loopback on 127.0.0.1:51121 at /oauth-callback, authorization URL
- *   accounts.google.com/o/oauth2/v2/auth with the embedded (base64-obfuscated,
- *   atob-decoded) client id/secret, five cloud-platform/userinfo/cclog/
- *   experimentsandconfigs scopes, access_type=offline, prompt=consent, no
- *   PKCE; form-urlencoded code exchange at oauth2.googleapis.com/token
- *   (5-minute early expiry skew); userinfo email lookup (optional, failures
- *   ignored); project discovery via POST v1internal:loadCodeAssist
- *   ({metadata:{ideType:"ANTIGRAVITY"}}) on daily then stable cloudcode-pa,
- *   else provisioning via POST v1internal:onboardUser (tier_id from
- *   allowedTiers/currentTier, ANTIGRAVITY onboard metadata, LRO polling with
- *   5 attempts / 2s interval, google-api-nodejs-client User-Agent suffix and
- *   X-Goog-Api-Client: gl-node/22.21.1); projectId stored on the credential.
- * - Refresh: grant_type=refresh_token with client_id + client_secret +
- *   refresh_token at oauth2.googleapis.com/token, keeping the prior refresh
- *   token when the response omits one, 5-minute early expiry skew.
- * - Usage: POST v1internal:fetchAvailableModels with Bearer access and body
- *   {project}, daily-cloudcode-pa first with the
- *   daily-cloudcode-pa.sandbox.googleapis.com fallback on transient statuses
- *   (408/429/5xx) or network failure; per-backend-counter percent-remaining
- *   normalization (used = 100-remaining, dedupe by backend counter/tier/
- *   window keeping the entry with a fraction, preferring lower remaining and
- *   keeping reset times, sorting ascending by remaining), daily/weekly
- *   windows explicit or inferred from reset distance, missing
- *   remainingFraction + resetTime treated as exhausted-until-reset.
- *
- * Deviations from the OMP sources (with reasons):
- * - OMP AIError kinds become typed BridgeErrors; OMP's null-report outcomes
- *   (HTTP failure after the endpoint list, missing projectId, expired token
- *   without a refresh path) become authRequired/rateLimited/upstreamError/
- *   transport from the shared status map, or noData for the null paths.
- * - Token rotation (pre-flight when expiresAtMs is missing or within 60s of
- *   the fetch, and once after a mid-flow 401) is bridge protocol and returns
- *   refreshedCredential; OMP delegates refresh solely to AuthStorage.
- * - The version/UA manifest discovery (ensureAntigravityVersion network
- *   probe) is not ported; the pinned DEFAULT_ANTIGRAVITY_VERSION "2.8.0" and
- *   the PI_AI_ANTIGRAVITY_* env overrides match OMP's offline behavior.
- * - OMP window durationMs and report metadata/raw/email are dropped (the
- *   bridge UsageReport has no such fields and forbids model-catalog fields).
- * - OMP's interactive onManualCodeInput paste race is ported onto the duplex
- *   AuthEvents.requestInput channel (see ../auth/refresh.ts); a pasteHint
- *   event carries the fallback instruction instead, and no tty is touched.
- * - A successful rotation is never dropped: when the retried usage fetch
- *   fails after rotating (pre-flight or mid-flow 401), the BridgeError
- *   carries refreshedCredential so the caller persists the rotated bundle
- *   before surfacing the error (Google burns the old refresh token).
+ * Antigravity quota/control-plane port from OMP d720e81fb747132f0b6c6c0f44eafc887552ec7f:
+ * packages/ai/src/usage/google-antigravity.ts and registry/oauth/google-antigravity.ts.
+ * Summary-first with legacy backend-counter fallback; one row per shared bucket,
+ * not OMP's duplicated model-ranking scopes. Unknown remaining amounts have no
+ * invented denominator and all severity uses the shared Swift-compatible bands.
+ * Native daily control plane hydrates eligibility, posts free-tier onboarding once,
+ * polls named GET operations within 30s, then refreshes project discovery.
+ * Existing Google OAuth client/scopes/callback/refresh constants remain unchanged.
+ * Bridge deviations: strict malformed-payload errors; terminal auth/throttle/abort
+ * failures are not hidden by optional summary fallback; all-disabled summary is
+ * noData. Rotated credentials survive every typed failure. No model catalog,
+ * external OMP runtime, automatic version discovery, or release test controls.
  */
 
 import { defaultBrowserOpener, openInBrowser } from "../auth/open-browser";
@@ -74,13 +26,12 @@ import { rotateOAuthToken, rethrowWithRefreshedCredential, waitForCallbackOrManu
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction, redactSecrets } from "../protocol";
 import type {
   BridgeCredential,
   BridgeRequest,
   BridgeSuccessResponse,
   OAuthCredential,
-  Severity,
   UsageReport,
   UsageWindow,
 } from "../protocol";
@@ -111,15 +62,13 @@ const SCOPES = [
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
-const CLOUD_CODE_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const DAILY_CLOUD_CODE_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const DAILY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
-const NODE_API_CLIENT_USER_AGENT = "google-api-nodejs-client/10.3.0";
-const GOOG_API_CLIENT_HEADER = "gl-node/22.21.1";
+const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
 const TIER_FREE = "free-tier";
-const PROJECT_ONBOARD_MAX_ATTEMPTS = 5;
-const PROJECT_ONBOARD_INTERVAL_MS = 2000;
+const PROJECT_ONBOARD_TIMEOUT_MS = 30_000;
+const PROJECT_ONBOARD_INTERVAL_MS = 1000;
 /** OMP google-oauth-shared.ts OAUTH_REQUEST_TIMEOUT_MS. */
 const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
 /** OMP 5-minute early expiry skew applied to expires_in. */
@@ -377,20 +326,6 @@ function clampFraction(value: number | undefined): number | undefined {
   return value;
 }
 
-/** OMP getUsageStatus over remainingFraction: <=0 exhausted, <=0.1 warning, else ok. */
-function antigravitySeverity(remainingFraction: number | undefined): Severity {
-  if (remainingFraction === undefined) {
-    return "unknown";
-  }
-  if (remainingFraction <= 0) {
-    return "exhausted";
-  }
-  if (remainingFraction <= 0.1) {
-    return "warning";
-  }
-  return "ok";
-}
-
 interface ParsedWindow {
   readonly id: string;
   readonly label: string;
@@ -425,7 +360,7 @@ type AntigravityAmount = {
  */
 function buildAmount(info: AntigravityQuotaInfo): AntigravityAmount {
   const apiRemainingFraction = clampFraction(info.remainingFraction);
-  const remainingFraction = apiRemainingFraction ?? (info.resetTime !== undefined ? 0 : undefined);
+  const remainingFraction = apiRemainingFraction ?? (parseIsoTimestamp(info.resetTime) !== undefined ? 0 : undefined);
   if (remainingFraction === undefined) {
     return {};
   }
@@ -516,6 +451,7 @@ type DedupeEntry = {
   windowId: string;
   counterName: string | undefined;
   counterKey: string;
+  bareFullRemaining: boolean;
 };
 
 /**
@@ -531,15 +467,20 @@ function dedupeAntigravityLimits(modelInfos: readonly AntigravityModelInfo[], no
     const inferredDescriptors = inferWindowDescriptors(quotaInfos, nowMs);
     for (const quotaInfo of quotaInfos) {
       const amount = buildAmount(quotaInfo);
+      if (amount.remainingFraction === undefined) continue;
       const window = parseWindow(quotaInfo, inferredDescriptors.get(quotaInfo));
       const tierKey = (quotaInfo.tier ?? "default").toLowerCase();
       const counterName = formatCounterName(quotaInfo);
       const counterKey = counterName?.toLowerCase() ?? "default";
       const windowId = window?.id ?? quotaInfo.windowId ?? "default";
+      // Capture before inferred daily descriptors erase the distinction between
+      // bare autocomplete counters and explicitly identified independent windows.
+      const bareFullRemaining = quotaInfo.remainingFraction === 1 && quotaInfo.resetTime === undefined &&
+        quotaInfo.windowId === undefined && quotaInfo.windowLabel === undefined;
       const key = `${counterKey}|${tierKey}|${windowId}`;
       const existing = deduped.get(key);
       if (existing === undefined) {
-        deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey });
+        deduped.set(key, { amount, window, tier: quotaInfo.tier, tierKey, windowId, counterName, counterKey, bareFullRemaining });
         continue;
       }
       const eFrac = existing.amount.remainingFraction;
@@ -569,10 +510,17 @@ function dedupeAntigravityLimits(modelInfos: readonly AntigravityModelInfo[], no
         windowId: existing.windowId,
         counterName: existing.counterName,
         counterKey: existing.counterKey,
+        bareFullRemaining: existing.bareFullRemaining && bareFullRemaining,
       });
     }
   }
-  return [...deduped.values()];
+  const meteredCounters = new Set([...deduped.values()]
+    .filter(entry => entry.window?.resetsAt !== undefined)
+    .map(entry => `${entry.counterKey}|${entry.tierKey}`));
+  // A missing reset alone is not phantom evidence. Suppress only bare unused
+  // duplicates beside a metered sibling, retaining consumed or explicit windows.
+  return [...deduped.values()].filter(entry => !entry.bareFullRemaining ||
+    !meteredCounters.has(`${entry.counterKey}|${entry.tierKey}`));
 }
 
 /** One bridge UsageWindow per OMP-normalized limit, sorted ascending by remaining. */
@@ -583,7 +531,7 @@ function buildUsageWindows(modelInfos: readonly AntigravityModelInfo[], nowMs: n
       id: `${PROVIDER_ID}:${entry.counterKey}:${entry.tierKey}:${entry.windowId}`,
       label: entry.counterName !== undefined ? `Usage (${entry.counterName})` : "Usage",
       unit: "percent" as const,
-      severity: antigravitySeverity(entry.amount.remainingFraction),
+      severity: severityForFraction(entry.amount.usedFraction),
       ...(entry.amount.usedFraction !== undefined
         ? { resolvedFraction: entry.amount.usedFraction, used: entry.amount.used, limit: entry.amount.limit }
         : {}),
@@ -639,7 +587,8 @@ export async function refreshAntigravityCredential(
   });
 }
 
-async function postFetchAvailableModels(
+async function postAntigravityQuota(
+  path: string,
   accessToken: string,
   projectId: string,
   fetcher: Fetcher,
@@ -654,7 +603,7 @@ async function postFetchAvailableModels(
     try {
       const response = await callProviderHttp({
         call: {
-          url: `${endpoint}${FETCH_AVAILABLE_MODELS_PATH}`,
+          url: `${endpoint}${path}`,
           method: "POST",
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -667,7 +616,9 @@ async function postFetchAvailableModels(
         signal,
         endpointLabel: "antigravity usage endpoint",
         extraSecrets: [accessToken],
+        acceptedStatuses: path === RETRIEVE_USER_QUOTA_SUMMARY_PATH ? [404, 405] : [],
       });
+      if (response.status === 404 || response.status === 405) return undefined;
       return await response.json();
     } catch (error) {
       // OMP endpoint fallback: transient statuses (408/429/5xx via the shared
@@ -685,6 +636,99 @@ async function postFetchAvailableModels(
     }
   }
   throw new BridgeError("upstreamError", "antigravity usage endpoints exhausted");
+}
+
+/** Parse only the upstream quota summary fields, never its model/ranking catalog. */
+function summaryWindows(payload: unknown): UsageWindow[] | undefined {
+  if (!isRecord(payload)) throw new BridgeError("malformedPayload", "antigravity summary must be an object");
+  const groups = summaryArray(payload["groups"]);
+  const topLevel = summaryArray(payload["buckets"]);
+  const grouped = groups.map(group => {
+    if (!isRecord(group)) throw new BridgeError("malformedPayload", "antigravity summary group must be an object");
+    return { label: summaryString(group, "displayName"), buckets: summaryArray(group["buckets"]) };
+  });
+  const sources = grouped.some(group => group.buckets.length > 0) ? grouped : [{ label: undefined, buckets: topLevel }];
+  if (!sources.some(group => group.buckets.length > 0)) return undefined;
+  const windows: UsageWindow[] = [];
+  for (const [groupIndex, group] of sources.entries()) {
+    for (const [bucketIndex, bucket] of group.buckets.entries()) {
+      if (!isRecord(bucket)) throw new BridgeError("malformedPayload", "antigravity summary bucket must be an object");
+      const disabled = bucket["disabled"];
+      if (disabled !== undefined && typeof disabled !== "boolean") {
+        throw new BridgeError("malformedPayload", "antigravity disabled must be boolean");
+      }
+      if (disabled === true) continue;
+      const id = summaryString(bucket, "bucketId");
+      const label = summaryString(bucket, "displayName");
+      const window = summaryString(bucket, "window");
+      const reset = parseIsoTimestamp(summaryString(bucket, "resetTime"));
+      const rawFraction = bucket["remainingFraction"];
+      if (rawFraction !== undefined && (typeof rawFraction !== "number" || !Number.isFinite(rawFraction))) {
+        throw new BridgeError("malformedPayload", "antigravity remainingFraction must be finite");
+      }
+      const fraction = clampFraction(rawFraction);
+      const remaining = bucket["remainingAmount"];
+      const amount = typeof remaining === "number" ? remaining :
+        typeof remaining === "string" && remaining.trim() !== "" ? Number(remaining) : undefined;
+      if (remaining !== undefined && (amount === undefined || !Number.isFinite(amount) || amount < 0)) {
+        throw new BridgeError("malformedPayload", "antigravity remainingAmount must be nonnegative and finite");
+      }
+      // Enabled buckets without a usable amount cannot cross the closed Swift
+      // utilization contract; keep valid siblings and let an all-empty summary
+      // produce noData rather than resurrecting the legacy catalog.
+      if (fraction === undefined && amount === undefined) continue;
+      const usedFraction = fraction === undefined ? undefined : 1 - fraction;
+      windows.push({
+        id: `${PROVIDER_ID}:summary:${groupIndex}:${id ?? window ?? bucketIndex}:${bucketIndex}`,
+        label: [group.label ?? label ?? "Usage", window].filter(value => value !== undefined).join(" - "),
+        unit: fraction === undefined ? "unknown" : "percent",
+        severity: severityForFraction(usedFraction),
+        ...(fraction !== undefined && usedFraction !== undefined ? {
+          remainingFraction: fraction, remaining: fraction * 100, used: usedFraction * 100,
+          limit: 100, resolvedFraction: usedFraction,
+        } : amount !== undefined ? { remaining: amount } : {}),
+        ...(reset !== undefined ? { resetsAtMs: reset } : {}),
+      });
+    }
+  }
+  return windows.sort((a, b) => (a.remainingFraction ?? 1) - (b.remainingFraction ?? 1));
+}
+
+function summaryArray(value: unknown): readonly unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new BridgeError("malformedPayload", "antigravity quota list must be an array");
+  return value;
+}
+
+function summaryString(record: Readonly<Record<string, unknown>>, key: string): string | undefined {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new BridgeError("malformedPayload", `antigravity ${key} must be a string`);
+  return value.trim() || undefined;
+}
+
+async function fetchAntigravityWindows(
+  access: string, projectId: string, fetcher: Fetcher, signal: AbortSignal, nowMs: number,
+): Promise<UsageWindow[]> {
+  let summary: unknown;
+  try {
+    summary = await postAntigravityQuota(RETRIEVE_USER_QUOTA_SUMMARY_PATH, access, projectId, fetcher, signal);
+  } catch (error) {
+    // An unavailable optional summary can fall back; auth, throttling, malformed
+    // data and cancellation remain typed failures, including after rotation.
+    if (!(error instanceof BridgeError) || (error.kind !== "upstreamError" && error.kind !== "transport")) throw error;
+  }
+  if (summary !== undefined) {
+    const windows = summaryWindows(summary);
+    if (windows !== undefined) return windows;
+  }
+  const payload = await postAntigravityQuota(FETCH_AVAILABLE_MODELS_PATH, access, projectId, fetcher, signal);
+  if (!isRecord(payload) || (payload["models"] !== undefined && !isRecord(payload["models"]))) {
+    throw new BridgeError("malformedPayload", "antigravity legacy quota response must contain a models object");
+  }
+  const modelInfos = Object.values(payload["models"] ?? {}).map(parseModelInfo)
+    .filter((info): info is AntigravityModelInfo => info !== undefined);
+  return buildUsageWindows(modelInfos, nowMs);
 }
 
 export async function fetchAntigravityUsage(input: {
@@ -729,30 +773,19 @@ export async function fetchAntigravityUsage(input: {
       throw new BridgeError("noData", "antigravity usage requires a project id on the credential");
     }
 
-    let payload: unknown;
+    let windows: UsageWindow[];
     try {
-      payload = await postFetchAvailableModels(current.oauth.access, projectId, fetcher, signal);
+      windows = await fetchAntigravityWindows(current.oauth.access, projectId, fetcher, signal, nowMs);
     } catch (error) {
       if (error instanceof BridgeError && error.kind === "authRequired" && refreshed === undefined && canRotate) {
         current = await refreshAntigravityCredential(credential, fetcher, signal);
         refreshed = current;
-        payload = await postFetchAvailableModels(current.oauth.access, projectId, fetcher, signal);
+        windows = await fetchAntigravityWindows(current.oauth.access, projectId, fetcher, signal, nowMs);
       } else {
         throw error;
       }
     }
 
-    const modelInfos: AntigravityModelInfo[] = [];
-    if (isRecord(payload) && isRecord(payload["models"])) {
-      for (const value of Object.values(payload["models"])) {
-        const modelInfo = parseModelInfo(value);
-        if (modelInfo !== undefined) {
-          modelInfos.push(modelInfo);
-        }
-      }
-    }
-
-    const windows = buildUsageWindows(modelInfos, nowMs);
     if (windows.length === 0) {
       throw new BridgeError("noData", "antigravity usage response contained no usable quota counters");
     }
@@ -793,245 +826,161 @@ export const googleAntigravityConnector: ConnectorModule = {
 // ---------------------------------------------------------------------------
 
 interface LoadCodeAssistPayload {
-  readonly cloudaicompanionProject?: string | { readonly id?: string };
-  readonly currentTier?: { readonly id?: string };
-  readonly allowedTiers?: ReadonlyArray<{ readonly id?: string; readonly isDefault?: boolean }>;
-}
-
-function readProjectId(value: unknown): string | undefined {
-  if (typeof value === "string" && value.length > 0) {
-    return value.trim();
-  }
-  if (value && typeof value === "object" && "id" in value && typeof (value as { id?: unknown }).id === "string") {
-    const id = (value as { id: string }).id.trim();
-    if (id.length > 0) {
-      return id;
-    }
-  }
-  return undefined;
-}
-
-function extractProjectId(payload: unknown): string | undefined {
-  if (!isRecord(payload)) {
-    return undefined;
-  }
-  for (const key of ["cloudaicompanionProject", "projectId", "project"]) {
-    const id = readProjectId(payload[key]);
-    if (id !== undefined) {
-      return id;
-    }
-  }
-  return undefined;
-}
-
-function getDefaultTierId(
-  allowedTiers: ReadonlyArray<{ id?: string; isDefault?: boolean }> | undefined,
-  currentTier: { id?: string } | undefined,
-): string {
-  if (allowedTiers !== undefined && allowedTiers.length > 0) {
-    const defaultTier = allowedTiers.find(
-      (tier) => tier.isDefault && typeof tier.id === "string" && tier.id.trim().length > 0,
-    );
-    if (defaultTier?.id !== undefined) {
-      return defaultTier.id.trim();
-    }
-  }
-  if (currentTier !== undefined && typeof currentTier.id === "string" && currentTier.id.trim().length > 0) {
-    return currentTier.id.trim();
-  }
-  return TIER_FREE;
+  readonly projectId?: string;
+  readonly hasCurrentTier: boolean;
+  readonly hasPaidTier: boolean;
+  readonly freeTierAllowed: boolean;
+  readonly ineligibility?: string;
 }
 
 function parseLoadCodeAssistPayload(payload: unknown): LoadCodeAssistPayload {
-  if (!isRecord(payload)) {
-    return {};
+  if (!isRecord(payload)) throw new BridgeError("malformedPayload", "antigravity loadCodeAssist must be an object");
+  for (const key of ["currentTier", "paidTier"]) {
+    const tier = payload[key];
+    if (tier !== undefined && tier !== null) {
+      if (!isRecord(tier)) throw new BridgeError("malformedPayload", "antigravity tier must be an object");
+      summaryString(tier, "id");
+    }
   }
-  const currentTier = payload["currentTier"];
-  const allowedTiers = payload["allowedTiers"];
+  const project = payload["cloudaicompanionProject"];
+  // Preserve the older object-id response supported by existing credentials.
+  const projectId = isRecord(project) ? summaryString(project, "id") : summaryString(payload, "cloudaicompanionProject");
+  const allowed = summaryArray(payload["allowedTiers"]).map(tier => {
+    if (!isRecord(tier)) throw new BridgeError("malformedPayload", "antigravity allowed tier must be an object");
+    return summaryString(tier, "id");
+  });
+  let ineligibility: string | undefined;
+  for (const tier of summaryArray(payload["ineligibleTiers"])) {
+    if (!isRecord(tier)) throw new BridgeError("malformedPayload", "antigravity ineligible tier must be an object");
+    const tierId = summaryString(tier, "tierId");
+    const reason = summaryString(tier, "reasonMessage");
+    const validationUrl = summaryString(tier, "validationUrl");
+    if (tierId === TIER_FREE && reason !== undefined) {
+      ineligibility = [reason, validationUrl].filter(value => value !== undefined).join("\n");
+    }
+  }
   return {
-    ...(isRecord(currentTier) && typeof currentTier["id"] === "string"
-      ? { currentTier: { id: currentTier["id"] } }
-      : {}),
-    ...(Array.isArray(allowedTiers)
-      ? {
-          allowedTiers: allowedTiers
-            .filter((tier): tier is Record<string, unknown> => isRecord(tier))
-            .map((tier) => ({
-              ...(typeof tier["id"] === "string" ? { id: tier["id"] } : {}),
-              ...(tier["isDefault"] === true ? { isDefault: true } : {}),
-            })),
-        }
-      : {}),
-  };
-}
-
-function getAntigravityOnboardMetadata(): { ide_type: string; ide_version: string; ide_name: string } {
-  return {
-    ide_type: "ANTIGRAVITY",
-    ide_version: getAntigravityVersion(),
-    ide_name: "antigravity",
+    ...(projectId !== undefined ? { projectId } : {}),
+    hasCurrentTier: payload["currentTier"] !== undefined && payload["currentTier"] !== null,
+    hasPaidTier: payload["paidTier"] !== undefined && payload["paidTier"] !== null,
+    freeTierAllowed: allowed.includes(TIER_FREE),
+    ...(ineligibility !== undefined ? { ineligibility } : {}),
   };
 }
 
 export type AntigravityLoginDeps = {
   readonly fetcher: Fetcher;
-  /** Injectable browser opener; defaults to the macOS `open` spawn. */
   readonly openBrowser?: BrowserOpener;
-  /** Injectable onboard LRO sleep; defaults to Bun.sleep (OMP interval 2s). */
+  /** Injectable clock and abortable wait for the single 30s onboarding budget. */
+  readonly now?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly timeoutSignal?: (ms: number) => AbortSignal;
 };
 
-/** Abortable sleep for the provisioning poll (OMP interval 2s): Bun.sleep
- * alone ignores the login signal, so cancellation would linger on it. */
 const defaultAntigravitySleep = (ms: number, signal?: AbortSignal): Promise<void> => {
-  if (signal === undefined) {
-    return Bun.sleep(ms);
-  }
-  if (signal.aborted) {
-    return Promise.reject(new BridgeError("timeout", "Antigravity login was cancelled"));
-  }
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  let timer: Timer | undefined;
-  const onAbort = (): void => {
-    clearTimeout(timer);
-    reject(new BridgeError("timeout", "Antigravity login was cancelled"));
-  };
-  timer = setTimeout(() => {
-    signal.removeEventListener("abort", onAbort);
-    resolve();
-  }, ms);
-  signal.addEventListener("abort", onAbort, { once: true });
-  return promise;
+  if (signal === undefined) return Bun.sleep(ms);
+  if (signal.aborted) return Promise.reject(new BridgeError("timeout", "Antigravity login was cancelled"));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new BridgeError("timeout", "Antigravity login was cancelled"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 };
+
+type ControlPlaneRequest = (path: string, method: "POST" | "GET", body?: unknown, timeoutMs?: number) => Promise<unknown>;
 
 async function onboardAntigravityProject(
-  endpoint: string,
-  accessToken: string,
-  headers: Readonly<Record<string, string>>,
-  onboardBody: { tier_id: string; metadata: { ide_type: string; ide_version: string; ide_name: string } },
-  signal: AbortSignal,
-  events: AuthEvents,
-  deps: AntigravityLoginDeps,
-): Promise<string> {
-  for (let attempt = 1; attempt <= PROJECT_ONBOARD_MAX_ATTEMPTS; attempt += 1) {
-    if (attempt > 1) {
-      events.onEvent({
-        type: "waiting",
-        detail: `Waiting for project provisioning (attempt ${attempt}/${PROJECT_ONBOARD_MAX_ATTEMPTS})...`,
-      });
-      throwIfAntigravityCancelled(signal);
-      await (deps.sleep ?? defaultAntigravitySleep)(PROJECT_ONBOARD_INTERVAL_MS, signal);
-    }
-
+  request: ControlPlaneRequest, signal: AbortSignal, deps: AntigravityLoginDeps,
+): Promise<void> {
+  const now = deps.now ?? Date.now;
+  const deadline = now() + PROJECT_ONBOARD_TIMEOUT_MS;
+  const remaining = (): number => {
     throwIfAntigravityCancelled(signal);
-    const response = await callProviderHttp({
-      call: {
-        url: `${endpoint}/v1internal:onboardUser`,
-        method: "POST",
-        headers: { ...headers },
-        body: JSON.stringify(onboardBody),
-      },
-      fetcher: deps.fetcher,
-      signal: antigravityRequestSignal(signal),
-      endpointLabel: "antigravity onboardUser endpoint",
-      extraSecrets: [accessToken],
-    });
-
-    const operation = await response.json();
-    if (!isRecord(operation) || operation["done"] !== true) {
-      continue;
+    const ms = deadline - now();
+    if (ms <= 0) throw new BridgeError("timeout", "Antigravity onboarding timed out after 30000ms");
+    return ms;
+  };
+  let operation = await request(":onboardUser", "POST", {
+    tierId: TIER_FREE, metadata: { ideType: "ANTIGRAVITY" },
+  }, remaining());
+  while (true) {
+    remaining();
+    if (!isRecord(operation) || (operation["done"] !== undefined && typeof operation["done"] !== "boolean")) {
+      throw new BridgeError("malformedPayload", "antigravity onboarding operation is malformed");
     }
-    const projectId = extractProjectId(operation["response"]);
-    if (projectId !== undefined) {
-      return projectId;
+    const name = summaryString(operation, "name");
+    const error = operation["error"];
+    if (error !== undefined && error !== null) {
+      if (!isRecord(error) || (error["code"] !== undefined &&
+        (typeof error["code"] !== "number" || !Number.isFinite(error["code"])))) {
+        throw new BridgeError("malformedPayload", "antigravity operation error is malformed");
+      }
+      summaryString(error, "message");
     }
+    if (operation["done"] === true) {
+      // Do not echo untrusted operation messages containing credential material.
+      if (error !== undefined && error !== null) throw new BridgeError("upstreamError", "Antigravity onboarding operation failed");
+      const response = operation["response"];
+      if (!isRecord(response) || summaryString(response, "@type") === undefined) {
+        throw new BridgeError("malformedPayload", "antigravity onboarding response is malformed");
+      }
+      summaryString(response, "cloudaicompanionProject");
+      return;
+    }
+    if (name === undefined || !/^operations\/[^?#\s]+$/.test(name) || name.split("/").includes("..")) {
+      throw new BridgeError("malformedPayload", "antigravity pending operation has no valid name");
+    }
+    await (deps.sleep ?? defaultAntigravitySleep)(Math.min(PROJECT_ONBOARD_INTERVAL_MS, remaining()), signal);
+    operation = await request("/" + name, "GET", undefined, remaining());
   }
-
-  throw new BridgeError(
-    "upstreamError",
-    `onboardUser did not return a provisioned project id after ${PROJECT_ONBOARD_MAX_ATTEMPTS} attempts`,
-  );
 }
 
 async function discoverAntigravityProject(
-  accessToken: string,
-  signal: AbortSignal,
-  events: AuthEvents,
-  deps: AntigravityLoginDeps,
+  accessToken: string, signal: AbortSignal, events: AuthEvents, deps: AntigravityLoginDeps,
 ): Promise<string> {
-  const headers = {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json",
-    "User-Agent": getAntigravityUserAgent(),
-  };
-
-  events.onEvent({ type: "waiting", detail: "Checking for existing project..." });
-  let lastError: BridgeError | undefined;
-  let fallbackTierId = TIER_FREE;
-  let loadedSuccessfully = false;
-
-  for (const endpoint of [DAILY_CLOUD_CODE_ENDPOINT, CLOUD_CODE_ENDPOINT]) {
+  const request: ControlPlaneRequest = async (path, method, body, timeoutMs = OAUTH_REQUEST_TIMEOUT_MS) => {
     throwIfAntigravityCancelled(signal);
-    let payload: unknown;
-    try {
-      const response = await callProviderHttp({
-        call: {
-          url: `${endpoint}/v1internal:loadCodeAssist`,
-          method: "POST",
-          headers: { ...headers },
-          body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
-        },
-        fetcher: deps.fetcher,
-        signal: antigravityRequestSignal(signal),
-        endpointLabel: "antigravity loadCodeAssist endpoint",
-        extraSecrets: [accessToken],
-      });
-      payload = await response.json();
-    } catch (error) {
-      if (!(error instanceof BridgeError)) {
-        throw error;
-      }
-      // OMP records the failed status and tries the other endpoint; aborts,
-      // network failures and unparseable bodies stay fatal.
-      if (error.kind === "timeout" || error.kind === "transport" || error.kind === "malformedPayload") {
-        throw error;
-      }
-      lastError = error;
-      continue;
-    }
-
-    loadedSuccessfully = true;
-    const loadPayload = parseLoadCodeAssistPayload(payload);
-    const existingProject = extractProjectId(payload);
-    if (existingProject !== undefined) {
-      return existingProject;
-    }
-    fallbackTierId = getDefaultTierId(loadPayload.allowedTiers, loadPayload.currentTier);
-  }
-
-  if (!loadedSuccessfully && lastError !== undefined) {
-    throw lastError;
-  }
-
-  events.onEvent({ type: "waiting", detail: "Provisioning project..." });
-  const onboardHeaders: Record<string, string> = {
-    ...headers,
-    "User-Agent": `${headers["User-Agent"]} ${NODE_API_CLIENT_USER_AGENT}`,
-    "X-Goog-Api-Client": GOOG_API_CLIENT_HEADER,
+    const response = await callProviderHttp({
+      call: {
+        url: DAILY_CLOUD_CODE_ENDPOINT + "/v1internal" + path, method,
+        headers: { Authorization: "Bearer " + accessToken, "Content-Type": "application/json", "User-Agent": getAntigravityUserAgent() },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      },
+      fetcher: deps.fetcher,
+      signal: AbortSignal.any([signal, (deps.timeoutSignal ?? AbortSignal.timeout)(timeoutMs)]),
+      endpointLabel: "antigravity control-plane endpoint", extraSecrets: [accessToken],
+    });
+    if (response.status !== 200) throw new BridgeError("upstreamError", "Antigravity control plane requires HTTP 200");
+    return await response.json();
   };
-  const onboardBody = {
-    tier_id: fallbackTierId,
-    metadata: getAntigravityOnboardMetadata(),
+  const load = async (): Promise<LoadCodeAssistPayload> => {
+    const initial = parseLoadCodeAssistPayload(await request(":loadCodeAssist", "POST", { metadata: { ideType: "ANTIGRAVITY" } }));
+    if (!initial.hasPaidTier && initial.projectId !== undefined) {
+      return parseLoadCodeAssistPayload(await request(":loadCodeAssist", "POST", {
+        cloudaicompanionProject: initial.projectId, metadata: { ideType: "ANTIGRAVITY" },
+      }));
+    }
+    return initial;
   };
-  return await onboardAntigravityProject(
-    DAILY_CLOUD_CODE_ENDPOINT,
-    accessToken,
-    onboardHeaders,
-    onboardBody,
-    signal,
-    events,
-    deps,
-  );
+  events.onEvent({ type: "waiting", detail: "Checking Cloud Code Assist account status..." });
+  const initial = await load();
+  if (!initial.freeTierAllowed && initial.ineligibility !== undefined) {
+    throw new BridgeError("permissionDenied", redactSecrets(initial.ineligibility, [accessToken]));
+  }
+  if (!initial.hasCurrentTier) {
+    events.onEvent({ type: "waiting", detail: "Provisioning the Antigravity free tier..." });
+    await onboardAntigravityProject(request, signal, deps);
+  }
+  events.onEvent({ type: "waiting", detail: "Refreshing Cloud Code Assist project..." });
+  const refreshed = await load();
+  if (refreshed.projectId === undefined) throw new BridgeError("upstreamError", "Antigravity project discovery returned no project");
+  return refreshed.projectId;
 }
 
 type AntigravityTokens = {

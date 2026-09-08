@@ -8,6 +8,8 @@ import {
   waitForCallbackOrManualPaste,
 } from "../src/auth/refresh";
 import { mockFetcher } from "./helpers";
+import { CallbackCancelledError } from "../src/auth/loopback";
+import { getEventListeners } from "node:events";
 
 const credential = {
   kind: "oauth" as const,
@@ -105,6 +107,68 @@ describe("parseManualCallbackInput (OMP parseCallbackInput)", () => {
 describe("waitForCallbackOrManualPaste", () => {
   const state = "state-unit";
   const prompt = { prompt: "paste the redirect URL", inputKind: "redirectUrl" as const, sensitive: true };
+
+  test("manual-only custom scheme re-prompts forged and missing state before accepting", async () => {
+    const controller = new AbortController();
+    const pastes = ["code-without-state", "?code=forged&state=wrong", `zcode://zai-auth/callback?code=valid&state=${state}`];
+    let prompts = 0;
+    const result = await waitForCallbackOrManualPaste({
+      expectedState: state, prompt, signal: controller.signal,
+      requestInput: async () => {
+        const paste = pastes[prompts++];
+        if (paste === undefined) throw new Error("unexpected prompt");
+        return paste;
+      },
+    });
+    expect(result).toEqual({ code: "valid", state });
+    expect(prompts).toBe(3);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  test("manual-only cancellation bounds even a non-cooperative input and removes listener", async () => {
+    const controller = new AbortController();
+    const ready = Promise.withResolvers<void>();
+    const paste = Promise.withResolvers<string>();
+    const result = waitForCallbackOrManualPaste({
+      expectedState: state, prompt, signal: controller.signal,
+      requestInput: () => { ready.resolve(); return paste.promise; },
+    });
+    const observed = Promise.allSettled([result]);
+    try {
+      await ready.promise;
+      controller.abort();
+      const [outcome] = await observed;
+      expect(outcome?.status).toBe("rejected");
+      if (outcome?.status === "rejected") expect(outcome.reason).toBeInstanceOf(CallbackCancelledError);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    } finally {
+      controller.abort();
+      paste.resolve("late-invalid");
+      await observed;
+    }
+  }, 1000);
+
+  test("manual-only broken input fails rather than waiting for a nonexistent callback", async () => {
+    const error = new BridgeError("transport", "input closed");
+    await expect(waitForCallbackOrManualPaste({
+      expectedState: state, prompt, signal,
+      requestInput: async () => { throw error; },
+    })).rejects.toBe(error);
+  });
+
+  test("manual-only absent input is invalidRequest", async () => {
+    await expect(waitForCallbackOrManualPaste({ expectedState: state, prompt, signal }))
+      .rejects.toMatchObject({ kind: "invalidRequest" });
+  });
+
+  test("manual-only pre-abort never requests input", async () => {
+    let calls = 0;
+    await expect(waitForCallbackOrManualPaste({
+      expectedState: state, prompt, signal: AbortSignal.abort(),
+      requestInput: async () => { calls++; return `code#${state}`; },
+    })).rejects.toBeInstanceOf(CallbackCancelledError);
+    expect(calls).toBe(0);
+  });
 
   test("a valid pasted redirect URL resolves the race without the callback", async () => {
     const wait = Promise.withResolvers<{ code: string; state: string }>();

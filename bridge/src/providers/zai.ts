@@ -1,9 +1,9 @@
 /**
  * Z.AI (GLM Coding Plan) provider: usage connector + auth module, hand-ported
- * from the pinned oh-my-pi checkout @ 8500092296621a6826b7136e840f8a59ea338958:
+ * from the pinned oh-my-pi checkout @ d720e81fb747132f0b6c6c0f44eafc887552ec7f:
  *
  * - packages/ai/src/usage/zai.ts            (quota fetch + normalization)
- * - packages/ai/src/registry/zai.ts         (apiKey paste login config)
+ * - packages/catalog/src/compat/rules/auth/zai*.kdl (login config)
  * - packages/ai/src/registry/oauth/zai.ts   (ZCode-like browser mint flow)
  *
  * Kept from the OMP sources (same endpoints, client ids, request bodies and
@@ -15,7 +15,7 @@
  *   windows (feature rows whose usageDetails carry search-prime + web-reader
  *   + zread become separate "zread" rows), unit enums 3/4/5/6 -> `${n}h` /
  *   `${n}d` / `${n}mo` / `1w` windows, anything else -> opaque `${n}u${unit}`
- *   ids; fraction from `percentage` (clamped /100) else currentValue/usage;
+ *   ids; CREDIT_LIMIT -> credits with exact currentValue/usage precedence;
  *   nextResetTime epoch coercion (seconds -> ms); severity uses the shared
  *   wire bands (>=0.8 warning / >=0.95 critical / >=1 exhausted) because the
  *   Swift UsageResponseDecoder recomputes severity from resolvedFraction and
@@ -33,6 +33,12 @@
  *   messages [{role:"user",content:"ping"}], max_tokens 1, temperature 0.
  *
  * Deviations from the OMP sources (with reasons):
+ * - Browser callback is zcode://zai-auth/callback via duplex manual paste
+ *   only. The App opens the emitted authorize URL; no native scheme handler
+ *   takeover or loopback listener is needed or installed.
+ * - Exact absolute ratios take precedence for all meter types (not only
+ *   credits) and remain uncapped above one: Swift requires used/limit and
+ *   resolvedFraction to agree, including over-quota and rounded payloads.
  * - OMP's secondary GET /api/monitor/usage/model-usage metadata fetch is not
  *   ported: the bridge UsageReport has no metadata/raw surface and model
  *   fields are forbidden on bridge reports.
@@ -57,10 +63,8 @@
  *   the endpoints are pinned to https://api.z.ai.
  */
 
-import { defaultBrowserOpener, openInBrowser } from "../auth/open-browser";
 import type { BrowserOpener } from "../auth/open-browser";
-import { CallbackCancelledError, CallbackFailedError, generateCallbackState, startLoopbackCallback } from "../auth/loopback";
-import type { LoopbackCallbackHandle } from "../auth/loopback";
+import { CallbackCancelledError, CallbackFailedError, generateCallbackState } from "../auth/loopback";
 import { waitForCallbackOrManualPaste } from "../auth/refresh";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
@@ -271,20 +275,21 @@ function isZaiFeatureRequestLimit(parsed: ZaiLimitItem): boolean {
   return codes.has("search-prime") && codes.has("web-reader") && codes.has("zread");
 }
 
-/** OMP usedFraction: percentage/100 clamped, else used/limit clamped. */
+/** Exact amounts override server-rounded percentages; match the Swift wire. */
 function zaiFractionFor(parsed: ZaiLimitItem): number | undefined {
+  if (parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0) {
+    return parsed.currentValue / parsed.usage;
+  }
   if (parsed.percentage !== undefined) {
     return Math.min(Math.max(parsed.percentage / 100, 0), 1);
-  }
-  if (parsed.currentValue !== undefined && parsed.usage !== undefined && parsed.usage > 0) {
-    return Math.min(parsed.currentValue / parsed.usage, 1);
   }
   return undefined;
 }
 
 /**
  * One bridge UsageWindow per OMP-normalized limit: TOKENS_LIMIT -> tokens
- * quota, TIME_LIMIT -> requests quota (zread feature rows separated).
+ * quota, TIME_LIMIT -> requests quota (zread feature rows separated),
+ * CREDIT_LIMIT -> genuine credit quota (never combined with token windows).
  */
 function windowForZaiLimit(parsed: ZaiLimitItem): UsageWindow | undefined {
   const identity = buildZaiWindowIdentity(parsed);
@@ -303,6 +308,31 @@ function windowForZaiLimit(parsed: ZaiLimitItem): UsageWindow | undefined {
       unit: "tokens",
       severity,
       ...amounts,
+    };
+  }
+  if (parsed.type === "CREDIT_LIMIT") {
+    // Credits are a new wire meter: reject impossible upstream amounts rather
+    // than emitting a success envelope that the closed Swift decoder rejects.
+    if ((parsed.currentValue !== undefined && parsed.currentValue < 0)
+      || (parsed.usage !== undefined && parsed.usage <= 0)
+      || (parsed.remaining !== undefined && parsed.remaining < 0)
+      || (fraction !== undefined && !Number.isFinite(fraction))) {
+      throw new BridgeError("malformedPayload", "zai credit quota contains invalid amounts");
+    }
+    if (parsed.remaining !== undefined && parsed.usage !== undefined
+      && (parsed.remaining > parsed.usage || (fraction !== undefined
+        && Math.abs(parsed.remaining / parsed.usage - Math.max(0, 1 - fraction)) > 1e-9))) {
+      throw new BridgeError("malformedPayload", "zai credit quota contains inconsistent remaining amount");
+    }
+    if (fraction === undefined && parsed.currentValue === undefined
+      && parsed.usage === undefined && parsed.remaining === undefined) return undefined;
+    return {
+      id: `zai:credits:${identity.id}`,
+      label: `ZAI ${identity.label} Credit Quota`,
+      unit: "credits",
+      severity,
+      ...amounts,
+      ...(parsed.remaining !== undefined ? { remaining: parsed.remaining } : {}),
     };
   }
   if (parsed.type === "TIME_LIMIT") {
@@ -335,19 +365,18 @@ const BIZ_BASE = "https://api.z.ai";
 const BUSINESS_LOGIN_URL = "https://api.z.ai/api/auth/z/login";
 /** OMP's own key name so sign-in never mutates ZCode's `zcode-api-key`. */
 const KEY_NAME = "oh-my-pi";
-const CALLBACK_PORT = 54548;
-const CALLBACK_PATH = "/callback";
+const REDIRECT_URI = "zcode://zai-auth/callback";
 /** OMP getJson/postJson per-request timeout. */
 const BIZ_REQUEST_TIMEOUT_MS = 30_000;
 
 const BROWSER_PASTE_HINT =
-  "Complete Z.ai login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.";
+  "Complete Z.ai login in your browser, then paste the final zcode:// callback URL including its state. Token Meter does not register a system URL handler.";
 
 const platformZaiFetch: Fetcher = (url, init) => fetch(url, init);
 
 export type ZaiLoginDeps = {
   readonly fetcher: Fetcher;
-  /** Injectable browser opener; defaults to the macOS `open` spawn. */
+  /** Retained for caller compatibility; the App opens the openUrl event. */
   readonly openBrowser?: BrowserOpener;
 };
 
@@ -430,7 +459,7 @@ async function loginZaiApiKey(
 }
 
 /**
- * OMP ZaiOAuthFlow: loopback callback on port 54548, authorize URL without
+ * OMP ZaiOAuthFlow: custom-scheme callback via manual paste, authorize URL without
  * PKCE, non-standard token exchange, then the business-API key mint.
  */
 async function loginZaiBrowser(
@@ -439,60 +468,40 @@ async function loginZaiBrowser(
   signal: AbortSignal,
   deps: ZaiLoginDeps,
 ): Promise<LoginResult> {
+  throwIfZaiCancelled(signal);
   const state = generateCallbackState();
-  let handle: LoopbackCallbackHandle;
-  try {
-    handle = await startLoopbackCallback(state, { preferredPort: CALLBACK_PORT, callbackPath: CALLBACK_PATH, signal });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new BridgeError("transport", `unable to start the local Z.ai OAuth callback server: ${message}`);
-  }
-  // The 300s loopback deadline can reject this promise on paths that never
-  // await it (e.g. an abort before the wait); keep that rejection observed.
-  void handle.wait.catch(() => undefined);
+  const authorizeUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
+    redirect_uri: REDIRECT_URI,
+    response_type: "code",
+    client_id: CLIENT_ID,
+    state,
+  }).toString()}`;
+  events.onEvent({ type: "openUrl", url: authorizeUrl });
+  events.onEvent({ type: "pasteHint", detail: BROWSER_PASTE_HINT });
+  events.onEvent({ type: "waiting", detail: "Waiting for browser authentication..." });
 
-  try {
-    // OMP generateAuthUrl parameter order: redirect_uri, response_type,
-    // client_id, state — and no PKCE (matches ZCode's authorize request).
-    const authorizeUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
-      redirect_uri: handle.redirectUri,
-      response_type: "code",
-      client_id: CLIENT_ID,
-      state,
-    }).toString()}`;
-    events.onEvent({ type: "openUrl", url: authorizeUrl });
-    
-    events.onEvent({ type: "pasteHint", detail: BROWSER_PASTE_HINT });
-    events.onEvent({ type: "waiting", detail: "Waiting for browser authentication..." });
+  const code = await waitForZaiCallback(state, events, signal);
+  throwIfZaiCancelled(signal);
+  events.onEvent({ type: "waiting", detail: "Exchanging authorization code for tokens..." });
 
-    const code = await waitForZaiCallback(handle, state, events, signal);
-    throwIfZaiCancelled(signal);
-    events.onEvent({ type: "waiting", detail: "Exchanging authorization code for tokens..." });
-
-    const exchanged = await exchangeZaiToken(code, state, handle.redirectUri, deps.fetcher, signal);
-    const mintedKey = await mintZaiApiKey(exchanged.access, deps.fetcher, signal);
-    const accountLabel = exchanged.email ?? exchanged.accountId;
-    return {
-      credential: { kind: "apiKey", secret: mintedKey },
-      ...(accountLabel !== undefined ? { accountLabel } : {}),
-    };
-  } finally {
-    handle.stop();
-  }
+  const exchanged = await exchangeZaiToken(code, state, REDIRECT_URI, deps.fetcher, signal);
+  const mintedKey = await mintZaiApiKey(exchanged.access, deps.fetcher, signal);
+  const accountLabel = exchanged.email ?? exchanged.accountId;
+  return {
+    credential: { kind: "apiKey", secret: mintedKey },
+    ...(accountLabel !== undefined ? { accountLabel } : {}),
+  };
 }
 
 async function waitForZaiCallback(
-  handle: LoopbackCallbackHandle,
   state: string,
   events: AuthEvents,
   signal: AbortSignal,
 ): Promise<string> {
   try {
-    // OMP races the loopback callback against the manual paste channel
-    // (onManualCodeInput); the bridge routes the paste through the duplex
-    // requestInput channel — never a tty.
+    // The allowlisted custom scheme is pasted on the existing duplex channel.
+    // Its state must match before any token exchange or key mint can begin.
     const callback = await waitForCallbackOrManualPaste({
-      wait: handle.wait,
       expectedState: state,
       requestInput: events.requestInput,
       prompt: { prompt: BROWSER_PASTE_HINT, inputKind: "redirectUrl", sensitive: true },

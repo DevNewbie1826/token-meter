@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "data": { "limits": [
+    { "type": "CREDIT_LIMIT", "usage": 12000, "currentValue": 1438, "remaining": 10562, "percentage": 11, "unit": 3, "number": 5 },
+    { "type": "CREDIT_LIMIT", "usage": 60000, "currentValue": 57000, "remaining": 3000, "percentage": 94, "unit": 6 }
+  ] }
+}
