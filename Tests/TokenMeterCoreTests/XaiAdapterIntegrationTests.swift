@@ -76,6 +76,41 @@ final class XaiAdapterIntegrationTests: XCTestCase {
         }
     }
 
+    func testActualAdapterExactRatiosKeepEveryValidIndependentRow() async throws {
+        let scenarios: [(String, [(String, Double)])] = [
+            ("monthly-at-cap", [("included:1mo", 100)]),
+            ("monthly-overage", [("included:1mo", 120)]),
+            ("optional-monthly-overage", [("credits:1w", 42), ("included:1mo", 120)]),
+            ("weekly-on-demand-overage", [("credits:1w", 42), ("on-demand", 120)]),
+            ("monthly-on-demand-overage", [("included:1mo", 42), ("on-demand", 120)]),
+            ("weekly-monthly-overflow", [("credits:1w", 42)]),
+            ("weekly-on-demand-overflow", [("credits:1w", 42)]),
+            ("monthly-overflow-valid-on-demand", [("on-demand", 42)]),
+            ("monthly-valid-on-demand-overflow", [("included:1mo", 42)]),
+        ]
+        for (scenario, expected) in scenarios {
+            let (response, _) = try await fetch(scenario)
+            guard case .report(let report) = response else {
+                if case .failure(let error) = response {
+                    print("xai \(scenario) rejected=\(error.wireCode) detail=\(error.wireMessage ?? "")")
+                }
+                XCTFail("lost valid independent xAI rows: \(scenario)")
+                continue
+            }
+            XCTAssertEqual(report.limits.map(\.limitId), expected.map { "xai-oauth:\($0.0)" }, scenario)
+            let rows = QuotaProjector().rows(for: report, nowMs: now)
+            XCTAssertEqual(rows.count, expected.count, scenario)
+            for (row, (suffix, used)) in zip(rows, expected) {
+                XCTAssertEqual(row.limitId, "xai-oauth:\(suffix)", scenario)
+                XCTAssertEqual(row.used, used, scenario)
+                XCTAssertEqual(row.limit, 100, scenario)
+                XCTAssertEqual(try XCTUnwrap(row.fraction), used / 100, accuracy: 1e-12, scenario)
+                XCTAssertEqual(row.severity, used >= 100 ? .exhausted : .ok, scenario)
+                print("xai \(scenario) accepted id=\(row.limitId) used=\(used) limit=100 fraction=\(row.fraction ?? -1) severity=\(row.severity)")
+            }
+        }
+    }
+
     func testActualAdapterPartialBillingFailuresKeepIndependentUsefulRows() async throws {
         for (scenario, ids) in [
             ("credits-500", ["xai-oauth:included:1mo"]),
@@ -94,6 +129,7 @@ final class XaiAdapterIntegrationTests: XCTestCase {
     func testActualAdapterUnusableAndFatalBoundariesStayErrors() async throws {
         for (scenario, expected) in [
             ("no-data", "noData"), ("expired-inferred", "noData"), ("inferred-monthly-500", "upstreamError"),
+            ("both-ratios-overflow", "noData"),
             ("credits-401", "authRequired"), ("credits-403", "permissionDenied"), ("credits-429", "rateLimited"),
             ("monthly-401", "authRequired"), ("monthly-403", "permissionDenied"), ("monthly-429", "rateLimited"),
         ] {

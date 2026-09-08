@@ -12,12 +12,36 @@ function syntheticFetcher(request: BridgeRequest, cancel: () => void): Fetcher {
   const oauth = request.credential.oauth;
   const scenario = oauth.identity?.["probeScenario"] ?? "";
   const threshold = /^threshold-(80|87\.5|89\.9|95|99\.9)$/.exec(scenario)?.[1];
+  const weeklyAmount = {
+    currentPeriod: { start: "2026-08-10T00:00:00Z", end: "2026-08-24T00:00:00Z", type: "WEEK" },
+    creditUsagePercent: 42, isUnifiedBillingUser: true,
+  };
+  const monthlyAmount = {
+    billingPeriodStart: "2026-08-01T00:00:00Z", billingPeriodEnd: "2026-09-01T00:00:00Z",
+    used: { val: 120 }, monthlyLimit: { val: 100 },
+  };
+  const onDemand = { onDemandUsed: { val: 120 }, onDemandCap: { val: 100 } };
+  const monthlyOverflow = { ...monthlyAmount, used: { val: Number.MAX_VALUE }, monthlyLimit: { val: Number.MIN_VALUE } };
+  const onDemandOverflow = { onDemandUsed: { val: Number.MAX_VALUE }, onDemandCap: { val: Number.MIN_VALUE } };
+  // Upstream HTTP fixtures only: normalization remains in the real adapter.
+  const amountCase = ([
+    ["monthly-at-cap", 500, {}, 200, { ...monthlyAmount, used: { val: 100 } }],
+    ["monthly-overage", 500, {}, 200, monthlyAmount],
+    ["optional-monthly-overage", 200, weeklyAmount, 200, monthlyAmount],
+    ["weekly-on-demand-overage", 200, { ...weeklyAmount, ...onDemand }, 500, {}],
+    ["monthly-on-demand-overage", 500, {}, 200, { ...monthlyAmount, used: { val: 42 }, ...onDemand }],
+    ["weekly-monthly-overflow", 200, weeklyAmount, 200, monthlyOverflow],
+    ["weekly-on-demand-overflow", 200, { ...weeklyAmount, ...onDemandOverflow }, 500, {}],
+    ["monthly-overflow-valid-on-demand", 500, {}, 200, { ...monthlyOverflow, ...onDemand, onDemandUsed: { val: 42 } }],
+    ["monthly-valid-on-demand-overflow", 500, {}, 200, { ...monthlyAmount, used: { val: 42 }, ...onDemandOverflow }],
+    ["both-ratios-overflow", 200, {}, 200, { ...monthlyOverflow, ...onDemandOverflow }],
+  ] as const).find(([name]) => name === scenario);
   const scenarios = new Set([
     "credits-500", "credits-malformed", "weekly-monthly-500", "inferred-monthly-500", "inferred-zero-monthly",
     "no-data", "expired-inferred", "credits-401", "credits-403", "credits-429", "monthly-401", "monthly-403", "monthly-429",
     "rotated-rate", "rotated-no-data", "rotated-malformed", "retry-401-rate", "identity-timeout", "identity-cancel", "billing-cancel",
   ]);
-  if (threshold === undefined && !scenarios.has(scenario)) throw new Error("unknown xAI probe scenario");
+  if (threshold === undefined && amountCase === undefined && !scenarios.has(scenario)) throw new Error("unknown xAI probe scenario");
   const percent = threshold === undefined ? 42 : Number(threshold);
   const weekly = { config: {
     currentPeriod: { start: "2026-08-10T00:00:00Z", end: "2026-08-24T00:00:00Z", type: "WEEK" },
@@ -47,6 +71,10 @@ function syntheticFetcher(request: BridgeRequest, cancel: () => void): Fetcher {
     }
     const isMonthly = url === "https://cli-chat-proxy.grok.com/v1/billing";
     if (!credits && !isMonthly) throw new Error("unrouted synthetic HTTP request");
+    if (amountCase !== undefined) {
+      const [, creditsStatus, creditsConfig, monthlyStatus, monthlyConfig] = amountCase;
+      return Response.json({ config: credits ? creditsConfig : monthlyConfig }, { status: credits ? creditsStatus : monthlyStatus });
+    }
     if (credits) creditsCalls += 1;
     if (scenario === "retry-401-rate" && credits && creditsCalls === 1) return Response.json({}, { status: 401 });
     if (scenario === "billing-cancel") {

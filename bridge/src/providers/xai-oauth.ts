@@ -47,7 +47,9 @@
  * Deviations from the OMP sources (with reasons):
  * - OMP UsageLimit scope/metadata/raw, window durationMs and monthly labels
  *   have no bridge equivalents. Derived remaining amounts are not duplicated;
- *   the bridge retains the source used/limit values. Window ids keep OMP's limit
+ *   the bridge retains the source used/limit values and exact finite ratios,
+ *   including overage, rather than OMP's upper-clamped display fractions.
+ *   Window ids keep OMP's limit
  *   ids verbatim. OMP's fetchUsage userinfo enrichment feeds only that
  *   metadata; the bridge surfaces identity solely through
  *   refreshedCredential, so the userinfo result (fetched only when the
@@ -509,7 +511,8 @@ function productLabel(product: string): string {
 /** OMP buildOnDemandLimit: cap must be positive and used known; unit unknown. */
 function buildOnDemandWindow(onDemandCap: number | undefined, onDemandUsed: number | undefined): UsageWindow | undefined {
   if (onDemandCap === undefined || onDemandCap <= 0 || onDemandUsed === undefined) return undefined;
-  const resolvedFraction = Math.min(onDemandUsed / onDemandCap, 1);
+  const resolvedFraction = onDemandUsed / onDemandCap;
+  if (!Number.isFinite(resolvedFraction)) return undefined;
   return {
     id: `${PROVIDER_ID}:on-demand`,
     label: "On-demand",
@@ -548,8 +551,9 @@ function buildMonthlyWindows(config: XaiMonthlyBillingConfig): UsageWindow[] {
   const endMs = parseIsoTimestamp(config.periodEnd);
   // parseMonthlyBillingConfig already rejected inverted/unparseable ranges.
   if (startMs === undefined || endMs === undefined || endMs <= startMs) return [];
-  const resolvedFraction = Math.min(config.used / config.limit, 1);
-  const windows: UsageWindow[] = [
+  const resolvedFraction = config.used / config.limit;
+  // Finite amounts can overflow on division; retain any valid on-demand sibling.
+  const windows: UsageWindow[] = Number.isFinite(resolvedFraction) ? [
     {
       id: `${PROVIDER_ID}:included:1mo`,
       label: "SuperGrok Monthly Included",
@@ -561,7 +565,7 @@ function buildMonthlyWindows(config: XaiMonthlyBillingConfig): UsageWindow[] {
       limit: config.limit,
       resetsAtMs: endMs,
     },
-  ];
+  ] : [];
   const onDemand = buildOnDemandWindow(config.onDemandCap, config.onDemandUsed);
   if (onDemand !== undefined) windows.push(onDemand);
   return windows;

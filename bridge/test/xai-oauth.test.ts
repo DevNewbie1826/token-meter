@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createXaiOauthConnector, loginXaiOauth, xaiOauthAuth, xaiOauthConnector } from "../src/providers/xai-oauth";
-import { BridgeError } from "../src/protocol";
+import { BridgeError, fractionsConsistent } from "../src/protocol";
 import type { BridgeCredential, BridgeErrorKind, UsageWindow } from "../src/protocol";
 import type { AuthEvent } from "../src/dispatch";
 import type { Fetcher } from "../src/connectors/provider-http";
@@ -191,6 +191,55 @@ async function expectKind(action: () => Promise<unknown>, kind: BridgeErrorKind)
   }
   throw new Error(`expected BridgeError ${kind}`);
 }
+
+describe("xAI exact amount ratios", () => {
+  const weekly = { currentPeriod: WEEKLY_PAYLOAD.config.currentPeriod, creditUsagePercent: 42, isUnifiedBillingUser: true };
+  const monthly = {
+    billingPeriodStart: MONTHLY_PAYLOAD.config.billingPeriodStart,
+    billingPeriodEnd: MONTHLY_PAYLOAD.config.billingPeriodEnd,
+    used: { val: 120 }, monthlyLimit: { val: 100 },
+  };
+  const onDemand = { onDemandUsed: { val: 120 }, onDemandCap: { val: 100 } };
+  // Both source amounts are finite; their ratio is not a valid wire number.
+  const monthlyOverflow = { ...monthly, used: { val: Number.MAX_VALUE }, monthlyLimit: { val: Number.MIN_VALUE } };
+  const onDemandOverflow = { onDemandUsed: { val: Number.MAX_VALUE }, onDemandCap: { val: Number.MIN_VALUE } };
+  for (const [scenario, creditsStatus, credits, monthlyStatus, included, expected] of [
+    ["monthly-at-cap", 500, {}, 200, { ...monthly, used: { val: 100 } }, [["included:1mo", 100]]],
+    ["monthly-overage", 500, {}, 200, monthly, [["included:1mo", 120]]],
+    ["optional-monthly-overage", 200, weekly, 200, monthly, [["credits:1w", 42], ["included:1mo", 120]]],
+    ["weekly-on-demand-overage", 200, { ...weekly, ...onDemand }, 500, {}, [["credits:1w", 42], ["on-demand", 120]]],
+    ["monthly-on-demand-overage", 500, {}, 200, { ...monthly, used: { val: 42 }, ...onDemand }, [["included:1mo", 42], ["on-demand", 120]]],
+    ["weekly-monthly-overflow", 200, weekly, 200, monthlyOverflow, [["credits:1w", 42]]],
+    ["weekly-on-demand-overflow", 200, { ...weekly, ...onDemandOverflow }, 500, {}, [["credits:1w", 42]]],
+    ["monthly-overflow-valid-on-demand", 500, {}, 200, { ...monthlyOverflow, ...onDemand, onDemandUsed: { val: 42 } }, [["on-demand", 42]]],
+    ["monthly-valid-on-demand-overflow", 500, {}, 200, { ...monthly, used: { val: 42 }, ...onDemandOverflow }, [["included:1mo", 42]]],
+    ["both-ratios-overflow", 200, {}, 200, { ...monthlyOverflow, ...onDemandOverflow }, []],
+  ] as const) {
+    test(`preserves exact finite ratios and valid siblings: ${scenario}`, async () => {
+      const fetcher = mockFetcher({
+        [`GET ${CREDITS_URL}`]: { status: creditsStatus, body: { config: credits } },
+        [`GET ${MONTHLY_URL}`]: { status: monthlyStatus, body: { config: included } },
+      });
+      const action = () => xaiOauthConnector.fetchUsage({ request: usageRequest(), fetcher, nowMs: NOW_MS });
+      if (expected.length === 0) {
+        await expectKind(action, "noData");
+      } else {
+        const result = await action();
+        expect(result.report.windows.map(({ id, used, limit, resolvedFraction, severity }) => ({
+          id, used, limit, resolvedFraction, severity,
+        }))).toEqual(expected.map(([suffix, used]) => ({
+          id: `xai-oauth:${suffix}`, used, limit: 100, resolvedFraction: used / 100,
+          severity: used >= 100 ? "exhausted" : "ok",
+        })));
+        for (const row of result.report.windows) {
+          expect(fractionsConsistent(row.resolvedFraction ?? NaN, row.used ?? NaN, row.limit ?? NaN)).toBe(true);
+        }
+        expect(JSON.stringify(result)).not.toContain(ACCESS);
+      }
+      expect(fetcher.calls.map(call => call.url)).toEqual([CREDITS_URL, MONTHLY_URL]);
+    });
+  }
+});
 
 describe("xaiOauthConnector", () => {
   for (const [percent, severity] of [[80, "warning"], [87.5, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"]] as const) {
