@@ -2,6 +2,8 @@
  * xAI SuperGrok (xai-oauth) provider module (device-flow auth + usage
  * connector), hand-ported from the pinned oh-my-pi checkout @
  * 8500092296621a6826b7136e840f8a59ea338958:
+ * Reviewed against d720e81fb747132f0b6c6c0f44eafc887552ec7f: billing
+ * normalization is unchanged upstream; retain the stricter pinned device flow.
  *
  * - packages/ai/src/registry/oauth/xai-oauth.ts (OIDC discovery, RFC 8628
  *   device authorization + token polling, token refresh, x.ai/grok.com
@@ -37,15 +39,15 @@
  *   xai-oauth:on-demand row (unit "unknown"), with the unified-account
  *   inferred-weekly / confirmsNoMonthlyQuota resolution, weekly periods
  *   defaulting an omitted creditUsagePercent to 0 while still active, and
- *   dedup by id (keep first); severity via OMP's usageStatus bands
- *   (>=1 exhausted, >=0.9 warning, else ok). API-key credentials are
- *   rejected outright: paid xAI API keys are a separate product and must
+ *   dedup by id (keep first). Severity uses shared bridge/Swift bands instead
+ *   of OMP's incompatible ladder. API-key credentials are rejected outright:
+ *   paid xAI API keys are a separate product and must
  *   never be sent to the CLI billing proxy (OMP supports() gate).
  *
  * Deviations from the OMP sources (with reasons):
- * - OMP UsageLimit scope/metadata/raw, the amount `remaining` fields, window
- *   durationMs and the monthly approx-days window label have no bridge
- *   UsageWindow equivalents and are dropped; window ids keep OMP's limit
+ * - OMP UsageLimit scope/metadata/raw, window durationMs and monthly labels
+ *   have no bridge equivalents. Derived remaining amounts are not duplicated;
+ *   the bridge retains the source used/limit values. Window ids keep OMP's limit
  *   ids verbatim. OMP's fetchUsage userinfo enrichment feeds only that
  *   metadata; the bridge surfaces identity solely through
  *   refreshedCredential, so the userinfo result (fetched only when the
@@ -54,7 +56,10 @@
  *   outcome — and otherwise discarded.
  * - OMP's null-report outcomes become typed BridgeErrors: HTTP failures map
  *   through callProviderHttp (401 -> authRequired, 429 -> rateLimited, ...),
- *   unusable billing shapes -> noData. OMP's expired-token skip probe is
+ *   unusable billing shapes -> noData. Independent transport/upstream/body
+ *   failures permit useful weekly/monthly fallback; with no usable rows the
+ *   original error survives. Auth, permission, rate-limit and parent deadline
+ *   failures remain fatal. OMP's expired-token skip probe is
  *   replaced by the bridge rotation contract: rotate before the first call
  *   when expiresAtMs is missing or within 60s (and refresh material exists),
  *   rotate once and retry once on a mid-flow 401. A successful rotation is
@@ -66,11 +71,11 @@
  *   rotation likewise mints expiresAtMs from nowMs.
  * - OMP's per-request 15s (discovery/userinfo) and 20s (token) timeouts are
  *   kept on the auth path, combined with the login AbortSignal via
- *   AbortSignal.any; connector calls are bounded by the bridge request
- *   deadline alone.
- * - redirect:"error" (OMP token polling/userinfo/refresh) is kept on the raw
- *   device-flow calls; callProviderHttp cannot express it, so the calls it
- *   wraps (discovery, refresh, userinfo, billing) drop it.
+ *   AbortSignal.any. Usage identity has its own optional 15s bound within the
+ *   bridge deadline; remaining connector calls use the bridge deadline.
+ *   Parent cancellation never becomes optional identity success.
+ * - Credential-bearing userinfo, token polling, refresh and billing calls
+ *   reject redirects, including calls through callProviderHttp.
  * - The device flow drives the shared poll engine in ../auth/device
  *   (pollOAuthDeviceCodeFlow) with OMP xai's own request/parse boundaries
  *   instead of runDeviceAuthorizationFlow, whose parser applies kimi's
@@ -84,12 +89,10 @@ import { rethrowWithRefreshedCredential } from "../auth/refresh";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
 import type {
-  BridgeRequest,
   BridgeSuccessResponse,
   OAuthCredential,
-  Severity,
   UsageReport,
   UsageWindow,
 } from "../protocol";
@@ -147,14 +150,6 @@ function parseIsoTimestamp(value: unknown): number | undefined {
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/** OMP usage/shared.ts usageStatus: >=1 exhausted, >=0.9 warning, else ok. */
-function usageStatus(usedFraction: number | undefined): Severity {
-  if (usedFraction === undefined) return "unknown";
-  if (usedFraction >= 1) return "exhausted";
-  if (usedFraction >= 0.9) return "warning";
-  return "ok";
 }
 
 function errorMessage(error: unknown): string {
@@ -268,9 +263,14 @@ type XaiIdentity = {
 
 /**
  * Best-effort OIDC userinfo for a valid access token (OMP fetchXAIOAuthIdentity):
- * every failure — transport, non-OK status, malformed body — yields null.
+ * Identity-only HTTP failures are optional; parent cancellation is not.
  */
-async function fetchXaiIdentity(accessToken: string, fetcher: Fetcher, signal: AbortSignal): Promise<XaiIdentity | null> {
+async function fetchXaiIdentity(
+  accessToken: string,
+  fetcher: Fetcher,
+  signal: AbortSignal,
+  timeoutSignal: (ms: number) => AbortSignal = AbortSignal.timeout,
+): Promise<XaiIdentity | null> {
   const token = accessToken.trim();
   if (token === "") return null;
   try {
@@ -278,17 +278,19 @@ async function fetchXaiIdentity(accessToken: string, fetcher: Fetcher, signal: A
       call: {
         url: XAI_OAUTH_USERINFO_URL,
         method: "GET",
+        redirect: "error",
         headers: {
           Authorization: `Bearer ${token}`,
           Accept: "application/json",
         },
       },
       fetcher,
-      signal,
+      signal: AbortSignal.any([signal, timeoutSignal(DISCOVERY_TIMEOUT_MS)]),
       endpointLabel: "xAI OIDC userinfo",
       extraSecrets: [token],
     });
     const payload = await response.json();
+    if (signal.aborted) throw new BridgeError("timeout", "xAI identity lookup was cancelled");
     if (!isRecord(payload)) return null;
     const sub = typeof payload["sub"] === "string" && payload["sub"].trim() !== "" ? payload["sub"].trim() : undefined;
     const email = typeof payload["email"] === "string" && payload["email"].trim() !== "" ? payload["email"].trim() : undefined;
@@ -299,8 +301,10 @@ async function fetchXaiIdentity(accessToken: string, fetcher: Fetcher, signal: A
       ...(sub !== undefined ? { accountId: sub } : {}),
       ...(email !== undefined ? { email: email.toLowerCase() } : {}),
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (signal.aborted) throw new BridgeError("timeout", "xAI identity lookup was cancelled");
+    if (error instanceof BridgeError) return null;
+    throw error;
   }
 }
 
@@ -488,7 +492,7 @@ function percentWindow(id: string, label: string, usagePercent: number, resetsAt
     label,
     unit: "percent",
     resolvedFraction,
-    severity: usageStatus(resolvedFraction),
+    severity: severityForFraction(resolvedFraction),
     used: usagePercent,
     limit: 100,
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
@@ -511,7 +515,7 @@ function buildOnDemandWindow(onDemandCap: number | undefined, onDemandUsed: numb
     label: "On-demand",
     unit: "unknown",
     resolvedFraction,
-    severity: usageStatus(resolvedFraction),
+    severity: severityForFraction(resolvedFraction),
     used: onDemandUsed,
     limit: onDemandCap,
   };
@@ -552,7 +556,7 @@ function buildMonthlyWindows(config: XaiMonthlyBillingConfig): UsageWindow[] {
       // xAI does not label the unit; amounts match the dashboard quota points.
       unit: "unknown",
       resolvedFraction,
-      severity: usageStatus(resolvedFraction),
+      severity: severityForFraction(resolvedFraction),
       used: config.used,
       limit: config.limit,
       resetsAtMs: endMs,
@@ -579,15 +583,28 @@ async function fetchBillingWindows(
   signal: AbortSignal,
   nowMs: number,
 ): Promise<UsageWindow[]> {
+  let recoverableError: BridgeError | undefined;
   const fetchBillingPayload = async (url: string): Promise<unknown> => {
-    const response = await callProviderHttp({
-      call: { url, method: "GET", headers: getXaiCliBillingHeaders(accessToken) },
-      fetcher,
-      signal,
-      endpointLabel: "xAI CLI billing",
-      extraSecrets: [accessToken],
-    });
-    return await response.json();
+    try {
+      const response = await callProviderHttp({
+        call: { url, method: "GET", headers: getXaiCliBillingHeaders(accessToken), redirect: "error" },
+        fetcher,
+        signal,
+        endpointLabel: "xAI CLI billing",
+        extraSecrets: [accessToken],
+      });
+      return await response.json();
+    } catch (error) {
+      // Only independent endpoint failures permit fallback. In particular,
+      // 401 must reach the one-rotation retry, and parent cancellation is fatal.
+      if (!(error instanceof BridgeError) || signal.aborted || ![
+        "upstreamError", "transport", "malformedPayload", "timeout",
+      ].includes(error.kind)) {
+        throw error;
+      }
+      recoverableError ??= error;
+      return null;
+    }
   };
 
   // Always probe weekly credits first (legacy SuperGrok shape).
@@ -628,6 +645,7 @@ async function fetchBillingWindows(
   const windows: UsageWindow[] = [];
   if (effectiveWeekly !== null) windows.push(...buildWeeklyWindows(effectiveWeekly));
   if (monthly !== null) windows.push(...buildMonthlyWindows(monthly));
+  if (windows.length === 0 && recoverableError !== undefined) throw recoverableError;
   // Deduplicate on-demand if both shapes carried the same cap (keep first).
   const seen = new Set<string>();
   return windows.filter((window) => {
@@ -721,6 +739,7 @@ async function rotateXaiToken(input: {
     call: {
       url: tokenEndpoint,
       method: "POST",
+      redirect: "error",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
@@ -755,15 +774,14 @@ async function rotateXaiToken(input: {
   };
 }
 
-function requestDeadlineSignal(request: BridgeRequest, nowMs: number): AbortSignal {
-  return AbortSignal.timeout(Math.max(1, request.deadlineAtMs - nowMs));
-}
-
 // ---------------------------------------------------------------------------
 // Usage connector (OMP usage/xai-oauth.ts fetchUsage)
 // ---------------------------------------------------------------------------
 
-export const xaiOauthConnector: ConnectorModule = {
+/** Provider-local clock seam; the registered connector uses native deadlines. */
+export const createXaiOauthConnector = (
+  timeoutSignal: (ms: number) => AbortSignal = AbortSignal.timeout,
+): ConnectorModule => ({
   providerId: PROVIDER_ID,
   connectorVersion: CONNECTOR_VERSION,
   async fetchUsage({ request, fetcher, nowMs }): Promise<BridgeSuccessResponse> {
@@ -786,7 +804,7 @@ export const xaiOauthConnector: ConnectorModule = {
       throw new BridgeError("authRequired", "xai-oauth credential carries no access token");
     }
 
-    const signal = requestDeadlineSignal(request, nowMs);
+    const signal = timeoutSignal(Math.max(1, request.deadlineAtMs - nowMs));
     let oauth = credential;
     let refreshedCredential: OAuthCredential | undefined;
 
@@ -802,7 +820,7 @@ export const xaiOauthConnector: ConnectorModule = {
       let email = oauth.oauth.identity?.["email"]?.trim().toLowerCase();
       let accountId = oauth.oauth.identity?.["accountId"];
       if (email === undefined) {
-        const identity = await fetchXaiIdentity(oauth.oauth.access, fetcher, signal);
+        const identity = await fetchXaiIdentity(oauth.oauth.access, fetcher, signal, timeoutSignal);
         if (identity !== null) {
           accountId = identity.accountId ?? accountId;
           email = identity.email;
@@ -863,7 +881,9 @@ export const xaiOauthConnector: ConnectorModule = {
       throw rethrowWithRefreshedCredential(error, refreshedCredential);
     }
   },
-};
+});
+
+export const xaiOauthConnector = createXaiOauthConnector();
 
 // ---------------------------------------------------------------------------
 // Auth module (OMP registry/oauth/xai-oauth.ts loginXAIOAuth)
@@ -1059,6 +1079,8 @@ export type XaiOauthLoginDeps = {
   readonly now?: () => number;
   /** Injectable sleep; forwarded to the poll engine for deterministic tests. */
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Injectable identity deadline; independent from the parent login signal. */
+  readonly identityTimeoutSignal?: (ms: number) => AbortSignal;
 };
 
 /**
@@ -1105,7 +1127,7 @@ export async function loginXaiOauth(
       ...(deps.sleep !== undefined ? { sleep: deps.sleep } : {}),
     });
 
-    const identity = await fetchXaiIdentity(tokens.access, fetcher, signal);
+    const identity = await fetchXaiIdentity(tokens.access, fetcher, signal, deps.identityTimeoutSignal);
     const accountId = identity?.accountId ?? extractXaiAccessTokenSubject(tokens.access);
     const email = identity?.email;
     const credential: OAuthCredential = withXaiIdentity(
