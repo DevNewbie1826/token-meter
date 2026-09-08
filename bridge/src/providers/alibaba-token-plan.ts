@@ -23,12 +23,11 @@
  *
  * OMP returns null on every soft failure; the bridge must fail typed
  * instead, so an unusable session or gateway payload and a payload with no
- * utilization windows map to noData. Severity follows OMP's provider-local
- * bands (>=1 exhausted, >=0.8 warning, else ok) rather than the bridge
- * defaults. Deviations from OMP are marked inline with "PORT NOTE".
+ * utilization windows map to noData. Severity follows the shared wire bands
+ * (warning >=0.8, critical >=0.95), not OMP's provider-local ladder. Deviations from OMP are marked inline with "PORT NOTE".
  */
 
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
 import type { BridgeRequest, BridgeSuccessResponse, UsageReport, UsageWindow } from "../protocol";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
@@ -193,13 +192,6 @@ function parseUsedFraction(value: unknown): number | undefined {
   return Math.min(1, parsed > 1 ? parsed / 100 : parsed);
 }
 
-/** Provider-local status bands from usage/alibaba-token-plan.ts (no critical band). */
-function usageStatus(usedFraction: number): UsageWindow["severity"] {
-  if (usedFraction >= 1) return "exhausted";
-  if (usedFraction >= 0.8) return "warning";
-  return "ok";
-}
-
 function buildWindow(
   id: string,
   label: string,
@@ -213,7 +205,7 @@ function buildWindow(
     unit: "percent",
     resolvedFraction: usedFraction,
     used: usedFraction * 100,
-    severity: usageStatus(usedFraction),
+    severity: severityForFraction(usedFraction),
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
   };
 }
@@ -258,8 +250,7 @@ export async function fetchAlibabaTokenPlanUsage(input: {
   // The China session endpoint answers with the console HTML page, whose raw
   // text callProviderHttp does not expose; the fetcher below tees the body so
   // the SEC_TOKEN regex can run while the call still goes through
-  // callProviderHttp. PORT NOTE: OMP's `redirect: "manual"` is not
-  // expressible through callProviderHttp and is omitted.
+  // callProviderHttp. Keep OMP's manual redirects on both cookie-bearing calls.
   let sessionText: string | undefined;
   const sessionFetcher: Fetcher = async (url, init) => {
     const response = await fetcher(url, init);
@@ -271,6 +262,7 @@ export async function fetchAlibabaTokenPlanUsage(input: {
   const session = await callProviderHttp({
     call: {
       url: consoleConfig.sessionUrl,
+      redirect: "manual",
       headers: {
         Accept: isChina ? "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8" : JSON_ACCEPT,
         Cookie: cookie,
@@ -318,7 +310,7 @@ export async function fetchAlibabaTokenPlanUsage(input: {
   }).toString();
 
   const usage = await callProviderHttp({
-    call: { url: consoleConfig.usageUrl, method: "POST", headers: gatewayHeaders, body },
+    call: { url: consoleConfig.usageUrl, method: "POST", headers: gatewayHeaders, body, redirect: "manual" },
     fetcher,
     signal,
     endpointLabel: "token-plan usage gateway",

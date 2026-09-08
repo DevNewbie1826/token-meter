@@ -120,13 +120,6 @@ const EXPECTED_WINDOWS: readonly UsageWindow[] = [
     resetsAtMs: 1787184000000,
   },
   {
-    id: "gemini-2.0-flash-lite:reset-1787184000000",
-    label: "Gemini Flash",
-    unit: "percent",
-    severity: "unknown",
-    resetsAtMs: 1787184000000,
-  },
-  {
     id: "unknown:quota",
     label: "Gemini quota",
     unit: "percent",
@@ -1095,5 +1088,33 @@ describe("googleGeminiCliAuth — module surface", () => {
       googleGeminiCliAuth.login(request.method, request.inputs ?? {}, eventCollector().events, AbortSignal.timeout(50)),
     );
     expect(error.kind).toBe("invalidRequest");
+  });
+});
+
+describe("Gemini latest quota-tier and wire conformance", () => {
+  test.each([
+    ["gemini-3-flash-preview", "Gemini 3-Flash"], ["gemini-3.5-flash", "Gemini 3-Flash"],
+    ["gemini-2.5-flash-lite", "Gemini Flash"], ["gemini-pro-agent", "Gemini Pro"],
+    ["new-flash-pro", "Gemini Flash"], ["new-pro", "Gemini Pro"],
+    ["NEW-FLASH", "Gemini NEW-FLASH"], ["other", "Gemini other"],
+  ] as const)("maps quota id %s without a catalog", async (modelId, label) => {
+    const response = await googleGeminiCliConnector.fetchUsage({ request: geminiUsageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({
+      [`POST ${LOAD_CODE_ASSIST_URL}`]: { status: 200, body: LOAD_BODY },
+      [`POST ${RETRIEVE_USER_QUOTA_URL}`]: { status: 200, body: { buckets: [{ modelId, remainingFraction: 0.2 }] } },
+    }) });
+    expect(response.report.windows[0]).toMatchObject({ id: `${modelId}:quota`, label, severity: "warning", resolvedFraction: 0.8 });
+  });
+  test("omits amountless buckets without losing usable siblings", async () => {
+    const response = await googleGeminiCliConnector.fetchUsage({ request: geminiUsageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({
+      [`POST ${LOAD_CODE_ASSIST_URL}`]: { status: 200, body: LOAD_BODY },
+      [`POST ${RETRIEVE_USER_QUOTA_URL}`]: { status: 200, body: { buckets: [{ modelId: "empty" }, { modelId: "known", remainingFraction: 0.05 }] } },
+    }) });
+    expect(response.report.windows.map(window => window.id)).toEqual(["known:quota"]);
+  });
+  test("returns noData for entirely amountless quota buckets", async () => {
+    await expect(googleGeminiCliConnector.fetchUsage({ request: geminiUsageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({
+      [`POST ${LOAD_CODE_ASSIST_URL}`]: { status: 200, body: LOAD_BODY },
+      [`POST ${RETRIEVE_USER_QUOTA_URL}`]: { status: 200, body: { buckets: [null, {}, { remainingFraction: "bad" }] } },
+    }) })).rejects.toMatchObject({ kind: "noData" });
   });
 });

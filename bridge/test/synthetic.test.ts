@@ -257,3 +257,32 @@ describe("syntheticAuth", () => {
     expect(fetcher.calls).toHaveLength(0);
   });
 });
+
+describe("Synthetic wire conformance", () => {
+  test.each([[79.9, "ok"], [80, "warning"], [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"]] as const)("uses wire severity for both independent windows at %s percent", async (percent, severity) => {
+    const response = await fetchUsage(quotasFetcher({ rollingFiveHourLimit: { remaining: 100 - percent, max: 100 }, weeklyTokenLimit: { maxCredits: "$100", percentRemaining: 100 - percent } }));
+    expect(response.report.windows.map(window => window.severity)).toEqual([severity, severity]);
+  });
+  test("retains remaining-only request and USD amounts without inventing utilization", async () => {
+    const response = await fetchUsage(quotasFetcher({ rollingFiveHourLimit: { remaining: 17 }, weeklyTokenLimit: { remainingCredits: "$2.50" } }));
+    expect(response.report.windows.map(({ unit, remaining, used, limit, resolvedFraction, severity }) => ({ unit, remaining, used, limit, resolvedFraction, severity }))).toEqual([
+      { unit: "requests", remaining: 17, used: undefined, limit: undefined, resolvedFraction: undefined, severity: "unknown" },
+      { unit: "usd", remaining: 2.5, used: undefined, limit: undefined, resolvedFraction: undefined, severity: "unknown" },
+    ]);
+  });
+  test("derives weekly utilization from amounts when percentRemaining is absent", async () => {
+    const response = await fetchUsage(quotasFetcher({ weeklyTokenLimit: { remainingCredits: "$2", maxCredits: "$10" } }));
+    expect(response.report.windows[0]).toMatchObject({ remaining: 2, used: 8, limit: 10, resolvedFraction: 0.8, severity: "warning" });
+  });
+  test("does not let limited override an explicit non-exhausted ratio", async () => {
+    const response = await fetchUsage(quotasFetcher({ rollingFiveHourLimit: { remaining: 50, max: 100, limited: true } }));
+    expect(response.report.windows[0]).toMatchObject({ resolvedFraction: 0.5, severity: "ok" });
+  });
+  test("keeps a cap-only row unknown", async () => {
+    const response = await fetchUsage(quotasFetcher({ rollingFiveHourLimit: { max: 100 } }));
+    expect(response.report.windows[0]).toMatchObject({ limit: 100, severity: "unknown" });
+  });
+  test.each([{ remaining: -1, max: 100 }, { remaining: 101, max: 100 }, { remaining: 0, max: 0 }])("rejects contradictory rolling amounts %j", async row => {
+    await expect(fetchUsage(quotasFetcher({ rollingFiveHourLimit: row }))).rejects.toMatchObject({ kind: "malformedPayload" });
+  });
+});

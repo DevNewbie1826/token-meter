@@ -24,8 +24,8 @@
  */
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
 import { callProviderHttp, type Fetcher } from "../connectors/provider-http";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeSuccessResponse, Severity, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeSuccessResponse, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "minimax-code";
 const CONNECTOR_VERSION = "minimax-code-1";
@@ -83,17 +83,6 @@ function parsePositiveTimestamp(value: unknown): number | undefined {
     return undefined;
   }
   return parsed < 1_000_000_000_000 ? parsed * 1000 : parsed;
-}
-
-/** OMP `usageStatus`: >=1 exhausted, >=0.9 warning, else ok. */
-function usageStatus(usedFraction: number): Severity {
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
 }
 
 function parseBucket(value: unknown): TokenPlanBucket | undefined {
@@ -188,12 +177,7 @@ function buildWindow(args: {
     used = Math.min(100, Math.max(0, 100 - args.remainingPercent));
   }
   const resolvedFraction = used / 100;
-  const severity: Severity =
-    args.windowStatus === STATUS_EXHAUSTED
-      ? "exhausted"
-      : args.windowStatus === STATUS_UNLIMITED
-        ? "ok"
-        : usageStatus(resolvedFraction);
+  const severity = severityForFraction(resolvedFraction);
   return {
     id: `${args.bucket.modelName}:${args.windowId}`,
     label: `${capitalizeName(args.bucket.modelName)} ${args.windowLabel}`,

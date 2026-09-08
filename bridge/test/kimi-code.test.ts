@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { kimiCodeAuth, kimiCodeConnector, loginKimiCode } from "../src/providers/kimi-code";
@@ -13,7 +13,13 @@ import type { MockResponse, RecordedCall } from "./helpers";
 // Keep the install device-id file (X-Msh-Device-Id) inside a temp dir so the
 // suite never touches the real ~/.omp/agent and stays deterministic.
 const agentDir = mkdtempSync(join(tmpdir(), "kimi-code-test-agent-"));
+const previousAgentDir = process.env["PI_CODING_AGENT_DIR"];
 process.env["PI_CODING_AGENT_DIR"] = agentDir;
+afterAll(() => {
+  if (previousAgentDir === undefined) delete process.env["PI_CODING_AGENT_DIR"];
+  else process.env["PI_CODING_AGENT_DIR"] = previousAgentDir;
+  rmSync(agentDir, { recursive: true, force: true });
+});
 
 const NOW_MS = 1787011200500;
 const ACCESS = "kimi-first-access";
@@ -739,5 +745,19 @@ describe("kimiCodeAuth", () => {
       () => kimiCodeAuth.login("browser", {}, { onEvent: () => {} }, new AbortController().signal),
       "invalidRequest",
     );
+  });
+});
+
+describe("Kimi amount wire conformance", () => {
+  test("retains a remaining-only row in its independent unknown-unit window", async () => {
+    const response = await kimiCodeConnector.fetchUsage({ request: usageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { usage: { remaining: 17 } } } }) });
+    expect(response.report.windows).toEqual([{ id: "kimi:7d", label: "Total quota", unit: "unknown", remaining: 17, severity: "unknown" }]);
+  });
+  test("retains over-cap amounts with their exact ratio", async () => {
+    const response = await kimiCodeConnector.fetchUsage({ request: usageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { usage: { used: 120, limit: 100 } } } }) });
+    expect(response.report.windows[0]).toMatchObject({ used: 120, limit: 100, resolvedFraction: 1.2, severity: "exhausted" });
+  });
+  test.each([{ used: -1, limit: 100 }, { used: 0, limit: 0 }, { remaining: 101, limit: 100 }])("rejects invalid amounts %j", async usage => {
+    await expect(kimiCodeConnector.fetchUsage({ request: usageRequest(), nowMs: NOW_MS, fetcher: mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { usage } } }) })).rejects.toMatchObject({ kind: "malformedPayload" });
   });
 });

@@ -183,7 +183,8 @@ function isAbortError(error: unknown): boolean {
 // Usage connector (OMP packages/ai/src/usage/gemini.ts)
 // ---------------------------------------------------------------------------
 
-/** OMP GEMINI_TIER_MAP: model id -> tier group, plus substring fallback. */
+/** Quota-only memberships match catalog compat/rules/runtime/behavior.kdl
+ * at d720e81f; no model catalog is imported. Exact IDs win over fallbacks. */
 const GEMINI_TIER_MAP: ReadonlyArray<{ readonly tier: string; readonly models: readonly string[] }> = [
   { tier: "3-Flash", models: ["gemini-3-flash-preview", "gemini-3-flash", "gemini-3.5-flash"] },
   {
@@ -210,9 +211,8 @@ function getModelTier(modelId: string): string | undefined {
       return entry.tier;
     }
   }
-  const normalized = modelId.toLowerCase();
-  if (normalized.includes("flash")) return "Flash";
-  if (normalized.includes("pro")) return "Pro";
+  if (modelId.includes("flash")) return "Flash";
+  if (modelId.includes("pro")) return "Pro";
   return undefined;
 }
 
@@ -232,13 +232,15 @@ function parseWindowReset(resetTime: string | undefined): { readonly windowId: s
 }
 
 /** OMP buildAmount: percent-remaining amounts, clamped, used rounded to 0.1. */
-function windowForBucket(bucket: unknown): UsageWindow {
+function windowForBucket(bucket: unknown): UsageWindow | undefined {
   const record = isRecord(bucket) ? bucket : {};
   const modelId =
     typeof record["modelId"] === "string" && record["modelId"] !== "" ? record["modelId"] : undefined;
   const rawRemaining = typeof record["remainingFraction"] === "number" ? record["remainingFraction"] : undefined;
   const remainingFraction =
     rawRemaining !== undefined && Number.isFinite(rawRemaining) ? rawRemaining : undefined;
+  // An amountless bucket cannot form a wire utilization, even with a reset.
+  if (remainingFraction === undefined) return undefined;
   const reset = parseWindowReset(typeof record["resetTime"] === "string" ? record["resetTime"] : undefined);
   const tier = modelId !== undefined ? getModelTier(modelId) : undefined;
   const label =
@@ -443,7 +445,7 @@ export async function fetchGoogleGeminiCliUsage(input: GoogleGeminiCliUsageInput
       buckets = await fetchQuotaPayload(active, fetcher, signal);
     }
 
-    const windows = buckets.map(windowForBucket);
+    const windows = buckets.map(windowForBucket).filter((window): window is UsageWindow => window !== undefined);
     if (windows.length === 0) {
       throw new BridgeError("noData", "Gemini CLI retrieveUserQuota returned no quota buckets");
     }
