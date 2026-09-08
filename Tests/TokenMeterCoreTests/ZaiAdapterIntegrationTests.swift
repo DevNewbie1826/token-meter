@@ -3,10 +3,34 @@ import XCTest
 @testable import TokenMeterCore
 
 final class ZaiAdapterIntegrationTests: XCTestCase {
-    private func fetch(_ scenario: String) async throws -> UsageReport {
+    private var executable: URL?
+
+    override func setUpWithError() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let executable = root.appendingPathComponent("bridge/build/zai-wire-probe")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("zai-probe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            try FileManager.default.removeItem(at: directory)
+            print("zai cleanup=removed-isolated-probe path=\(directory.path)")
+        }
+        let binary = directory.appendingPathComponent("zai-wire-probe")
+        let compiler = Process()
+        compiler.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        compiler.currentDirectoryURL = root.appendingPathComponent("bridge")
+        compiler.arguments = ["bun", "build", "test/zai-wire-probe.ts", "--compile", "--outfile", binary.path]
+        compiler.standardOutput = FileHandle.standardError
+        compiler.standardError = FileHandle.standardError
+        try compiler.run()
+        compiler.waitUntilExit()
+        guard compiler.terminationStatus == 0 else {
+            throw NSError(domain: "ZaiProbeCompilation", code: Int(compiler.terminationStatus))
+        }
+        executable = binary
+    }
+
+    private func fetch(_ scenario: String) async throws -> UsageReport {
+        let executable = try XCTUnwrap(executable)
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
         let request = UsageRequest(
             requestId: testRequestId, operation: .fetchUsage,
