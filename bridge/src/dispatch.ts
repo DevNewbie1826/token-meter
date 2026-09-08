@@ -1,5 +1,5 @@
 /**
- * TokenMeter/1.2.0 dispatch and registration layer. Connectors and auth
+ * TokenMeter/1.3.0 dispatch and registration layer. Connectors and auth
  * modules register themselves here; the CLI resolves them by providerId.
  *
  * The auth module contracts (AuthMethod, LoginInputs, AuthEvent, AuthEvents,

@@ -321,7 +321,7 @@ describe("zaiConnector — typed error paths", () => {
   test("rejects an absent credential with missingCredential", async () => {
     const fetcher = mockFetcher([]);
     const request: BridgeRequest = {
-      schemaVersion: "1.2.0",
+      schemaVersion: "1.3.0",
       requestId: "00000000-0000-4000-8000-000000000001",
       operation: "fetchUsage",
       providerId: "zai",

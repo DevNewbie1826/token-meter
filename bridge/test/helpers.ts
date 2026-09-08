@@ -48,7 +48,7 @@ export type UsageRequestOverrides = {
   readonly credential?: BridgeCredential;
 };
 
-/** A valid TokenMeter/1.2.0 usage request for the fixture connector. */
+/** A valid TokenMeter/1.3.0 usage request for the fixture connector. */
 export function buildUsageRequest(overrides: UsageRequestOverrides = {}): BridgeRequest {
   return {
     schemaVersion: PROTOCOL_VERSION,
@@ -72,7 +72,7 @@ export type LoginRequestOverrides = {
   readonly inputs?: LoginInputs;
 };
 
-/** A valid TokenMeter/1.2.0 login request using the apiKey method. */
+/** A valid TokenMeter/1.3.0 login request using the apiKey method. */
 export function buildLoginRequest(overrides: LoginRequestOverrides = {}): LoginRequest {
   return {
     schemaVersion: PROTOCOL_VERSION,

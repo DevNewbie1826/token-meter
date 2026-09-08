@@ -1,4 +1,4 @@
-// Process transport for the TokenMeter/1.2.0 bridge protocol.
+// Process transport for the TokenMeter/1.3.0 bridge protocol.
 //
 // Usage runs as `usage --stdin`; login runs as a duplex `login --stdin`
 // NDJSON session. Request objects — the only places credentials or login
@@ -151,7 +151,10 @@ public struct BridgeClient: Sendable {
         do {
             let response = try UsageResponseDecoder().decode(
                 stdout,
-                expectingRequestId: request.requestId
+                expectingRequestId: request.requestId,
+                expectingProviderId: request.providerId,
+                expectingConnectorId: request.connectorId,
+                expectingAccountRef: request.accountRef
             )
             if case .failure(let error) = response {
                 let secrets = (request.credential?.redactionSecrets ?? [])
@@ -161,7 +164,8 @@ public struct BridgeClient: Sendable {
             return response
         } catch let error as BridgeServiceError {
             return .failure(error.redacting(
-                secrets: request.credential?.redactionSecrets ?? []
+                secrets: (request.credential?.redactionSecrets ?? [])
+                    + (error.refreshedCredential?.redactionSecrets ?? [])
             ))
         } catch {
             return .failure(.internalError("undecodable bridge response"))

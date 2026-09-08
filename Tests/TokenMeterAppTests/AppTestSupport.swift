@@ -263,7 +263,7 @@ func testReport(
     refreshedCredential: BridgeCredential? = nil
 ) -> UsageReport {
     UsageReport(
-        schemaVersion: "1.2.0",
+        schemaVersion: "1.3.0",
         requestId: request.requestId,
         providerId: request.providerId,
         connectorId: request.connectorId,

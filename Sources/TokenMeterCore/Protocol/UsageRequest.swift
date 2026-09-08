@@ -1,8 +1,8 @@
-// Request-side wire types for the `TokenMeter/1.2.0` bridge protocol.
+// Request-side wire types for the `TokenMeter/1.3.0` bridge protocol.
 //
 // The credential travels only inside request objects, which the
 // BridgeClient writes to the helper's stdin pipe — never argv, never the
-// environment. TokenMeter/1.2.0 uses a closed credential union:
+// environment. TokenMeter/1.3.0 uses a closed credential union:
 // static bearer/apiKey secrets and the oauth token bundle whose `secret`
 // mirrors `oauth.access`.
 import Foundation
@@ -26,7 +26,7 @@ public enum StaticCredentialKind: String, Equatable, Sendable, CaseIterable {
     case apiKey
 }
 
-/// One credential of the TokenMeter/1.2.0 union.
+/// One credential of the TokenMeter/1.3.0 union.
 ///
 /// Wire shape (strict — unknown fields are rejected on decode):
 ///

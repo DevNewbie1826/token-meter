@@ -1,6 +1,6 @@
 /**
  * Fixture (demo) connector. Normalizes a complete multi-window quota snapshot
- * into a TokenMeter/1.2.0 success envelope, or fails with typed
+ * into a TokenMeter/1.3.0 success envelope, or fails with typed
  * malformedPayload/partialPayload errors. Never emits partial values.
  */
 
@@ -28,6 +28,7 @@ const WINDOW_KEYS: readonly string[] = [
   "used",
   "limit",
   "fraction",
+  "remaining",
   "remainingFraction",
   "percentUsed",
   "resetsAtMs",
@@ -121,6 +122,7 @@ function normalizeWindow(value: unknown): UsageWindow {
   }
   const used = optionalNonNegative(record["used"], id, "used");
   const limit = optionalPositive(record["limit"], id, "limit");
+  const remaining = optionalNonNegative(record["remaining"], id, "remaining");
   const fraction = optionalNonNegative(record["fraction"], id, "fraction");
   const percentUsed = optionalNonNegative(record["percentUsed"], id, "percentUsed");
   const remainingRaw = optionalNonNegative(record["remainingFraction"], id, "remainingFraction");
@@ -130,7 +132,7 @@ function normalizeWindow(value: unknown): UsageWindow {
     record["resetsAtMs"] === undefined ? undefined : fixtureEpochMs(record["resetsAtMs"], "resetsAtMs");
   const resetCredits = optionalNonNegative(record["resetCredits"], id, "resetCredits");
 
-  if ((used === undefined) !== (limit === undefined)) {
+  if ((used !== undefined && limit === undefined) || (limit !== undefined && used === undefined && remaining === undefined)) {
     throw new BridgeError("partialPayload", `window "${id}" carries only one of used/limit`);
   }
   if (fraction !== undefined && used !== undefined && limit !== undefined && !fractionsConsistent(fraction, used, limit)) {
@@ -138,7 +140,25 @@ function normalizeWindow(value: unknown): UsageWindow {
   }
 
   const resolvedFraction = resolveFraction({ fraction, used, limit, percentUsed, remainingFraction });
-  if (resolvedFraction === undefined && resetCredits === undefined) {
+  if (resolvedFraction !== undefined && !Number.isFinite(resolvedFraction)) {
+    throw new BridgeError("malformedPayload", `non-finite utilization ratio in window "${id}"`);
+  }
+  if (remaining !== undefined && limit !== undefined && remaining > limit) {
+    throw new BridgeError("malformedPayload", `remaining exceeds limit in window "${id}"`);
+  }
+  // Compare normalized proportions to avoid overflow in used + remaining.
+  // Overage usage legitimately leaves zero remaining quota.
+  const expectedRemaining = resolvedFraction === undefined ? undefined : Math.max(0, 1 - resolvedFraction);
+  if (remainingFraction !== undefined && expectedRemaining !== undefined && !fractionsConsistent(remainingFraction, expectedRemaining, 1)) {
+    throw new BridgeError("malformedPayload", `inconsistent remainingFraction in window "${id}"`);
+  }
+  if (remaining !== undefined && limit !== undefined) {
+    const expected = remainingFraction ?? expectedRemaining;
+    if (expected !== undefined && !fractionsConsistent(expected, remaining, limit)) {
+      throw new BridgeError("malformedPayload", `inconsistent remaining/limit amounts in window "${id}"`);
+    }
+  }
+  if (resolvedFraction === undefined && remaining === undefined && resetCredits === undefined) {
     throw new BridgeError("partialPayload", `window "${id}" lacks any utilization or reset amounts`);
   }
 
@@ -150,6 +170,8 @@ function normalizeWindow(value: unknown): UsageWindow {
     severity: severityForFraction(resolvedFraction),
     ...(used !== undefined ? { used } : {}),
     ...(limit !== undefined ? { limit } : {}),
+    ...(remaining !== undefined ? { remaining } : {}),
+    ...(remainingFraction !== undefined ? { remainingFraction } : {}),
     ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
     ...(resetCredits !== undefined ? { resetCredits } : {}),
   };

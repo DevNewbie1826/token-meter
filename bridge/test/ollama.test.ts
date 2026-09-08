@@ -25,7 +25,7 @@ describe("ollama provider", () => {
       nowMs: 1787011200000,
     });
     expect(response).toEqual({
-      schemaVersion: "1.2.0",
+      schemaVersion: "1.3.0",
       requestId: "00000000-0000-4000-8000-000000000001",
       providerId: "ollama",
       connectorId: "ollama",

@@ -1,0 +1,9 @@
+{
+  "snapshotVersion": "fixture-remaining-1",
+  "fetchedAtMs": 1787011200000,
+  "windows": [
+    { "id": "credits-remaining", "unit": "credits", "remaining": 250 },
+    { "id": "credits-weekly", "unit": "credits", "remaining": 125, "remainingFraction": 0.125, "limit": 1000 },
+    { "id": "credits-exhausted", "unit": "credits", "remaining": 0, "remainingFraction": 0 }
+  ]
+}

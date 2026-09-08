@@ -1,4 +1,4 @@
-// Strict request encoder for the TokenMeter/1.2.0 bridge protocol.
+// Strict request encoder for the TokenMeter/1.3.0 bridge protocol.
 //
 // Emits exactly the locked field set with deterministic key order and
 // enforces the 64 KiB request framing bound. The credential union travels
@@ -6,7 +6,7 @@
 import Foundation
 
 public struct UsageRequestEncoder: Sendable {
-    public static let protocolSchemaVersion = "1.2.0"
+    public static let protocolSchemaVersion = "1.3.0"
     public static let maximumRequestBytes = 64 * 1024
 
     public init() {}

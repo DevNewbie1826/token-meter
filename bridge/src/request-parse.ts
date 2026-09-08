@@ -1,5 +1,5 @@
 /**
- * Strict TokenMeter/1.2.0 request parsing: the trust boundary. Untrusted
+ * Strict TokenMeter/1.3.0 request parsing: the trust boundary. Untrusted
  * stdin JSON is validated once here; interior code only ever receives typed
  * requests. Unknown fields, foreign versions, framing violations, credential
  * union violations and scheduling-policy violations are typed BridgeErrors.

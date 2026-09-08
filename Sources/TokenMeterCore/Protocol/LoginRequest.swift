@@ -1,4 +1,4 @@
-// Request-side wire types for the TokenMeter/1.2.0 `login --stdin`
+// Request-side wire types for the TokenMeter/1.3.0 `login --stdin`
 // command. The request is written only to the helper's stdin.
 import Foundation
 
@@ -57,7 +57,7 @@ public struct LoginRequest: Equatable, Sendable {
 /// field set with deterministic key order and enforces the 64 KiB request
 /// framing bound.
 public struct LoginRequestEncoder: Sendable {
-    public static let protocolSchemaVersion = "1.2.0"
+    public static let protocolSchemaVersion = "1.3.0"
     public static let maximumRequestBytes = 64 * 1024
 
     public init() {}

@@ -1,5 +1,5 @@
 /**
- * TokenMeter/1.2.0 wire vocabulary: constants, closed types, the typed
+ * TokenMeter/1.3.0 wire vocabulary: constants, closed types, the typed
  * BridgeError, response encoding, secret redaction and severity bands.
  * Request parsing lives in request-parse.ts; protocol.ts is the public
  * facade both are surfaced through. The login command's wire types live in
@@ -7,11 +7,11 @@
  */
 
 export const PROTOCOL_FAMILY = "TokenMeter";
-export const PROTOCOL_VERSION = "1.2.0";
+export const PROTOCOL_VERSION = "1.3.0";
 export const MAX_REQUEST_BYTES = 64 * 1024;
 export const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
-export const USAGE_UNITS = ["percent", "tokens", "requests", "usd", "minutes", "bytes", "unknown"] as const;
+export const USAGE_UNITS = ["percent", "tokens", "requests", "usd", "minutes", "bytes", "credits", "unknown"] as const;
 export type UsageUnit = (typeof USAGE_UNITS)[number];
 
 export const SEVERITIES = ["ok", "warning", "critical", "exhausted", "unknown"] as const;
@@ -109,6 +109,10 @@ export type UsageWindow = {
   readonly severity: Severity;
   readonly used?: number;
   readonly limit?: number;
+  /** Finite nonnegative raw quota; alone it does not imply a used fraction. */
+  readonly remaining?: number;
+  /** Remaining proportion in [0, 1], distinct from the resolved used fraction. */
+  readonly remainingFraction?: number;
   readonly resetsAtMs?: number;
   readonly resetCredits?: number;
 };

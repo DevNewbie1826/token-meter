@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://token-meter.app/schemas/TokenMeter/1.2.0/common.schema.json",
-  "title": "TokenMeter/1.2.0 common definitions",
+  "$id": "https://token-meter.app/schemas/TokenMeter/1.3.0/common.schema.json",
+  "title": "TokenMeter/1.3.0 common definitions",
   "description": "Shared vocabulary for the TokenMeter bridge wire protocol. Every object is closed: unknown fields are rejected.",
   "$defs": {
-    "schemaVersion": { "const": "1.2.0" },
+    "schemaVersion": { "const": "1.3.0" },
     "requestId": { "type": "string", "minLength": 1 },
     "providerId": { "type": "string", "minLength": 1 },
     "connectorId": { "type": "string", "minLength": 1 },
@@ -69,7 +69,7 @@
         }
       ]
     },
-    "usageUnit": { "enum": ["percent", "tokens", "requests", "usd", "minutes", "bytes", "unknown"] },
+    "usageUnit": { "enum": ["percent", "tokens", "requests", "usd", "minutes", "bytes", "credits", "unknown"] },
     "severity": { "enum": ["ok", "warning", "critical", "exhausted", "unknown"] },
     "productKind": { "enum": ["quota", "billingUsage", "organizationUsage", "localActivity"] },
     "reportSourceKind": {
@@ -83,6 +83,8 @@
         { "required": ["resolvedFraction"] },
         { "required": ["used"] },
         { "required": ["limit"] },
+        { "required": ["remaining"] },
+        { "required": ["remainingFraction"] },
         { "required": ["resetCredits"] }
       ],
       "properties": {
@@ -93,6 +95,8 @@
         "severity": { "$ref": "#/$defs/severity" },
         "used": { "type": "number", "minimum": 0 },
         "limit": { "type": "number", "exclusiveMinimum": 0 },
+        "remaining": { "type": "number", "minimum": 0 },
+        "remainingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
         "resetsAtMs": { "$ref": "#/$defs/epochMs" },
         "resetCredits": { "type": "number", "minimum": 0 }
       }
