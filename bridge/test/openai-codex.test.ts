@@ -1588,3 +1588,67 @@ describe("Codex closed-wire severity boundaries", () => {
     });
   }
 });
+
+
+describe("Codex decoded profile type boundary", () => {
+  const authClaim = "https://api.openai.com/auth";
+  const profileClaim = "https://api.openai.com/profile";
+  const unusable = [["number", 17], ["object", {}], ["array", []], ["boolean", false],
+    ["absent", undefined], ["null", null], ["empty", ""], ["whitespace", " \t "]] as const;
+  const claims = (accountId?: unknown, email?: unknown, plan?: unknown) => ({
+    [authClaim]: { chatgpt_account_id: accountId, chatgpt_plan_type: plan }, [profileClaim]: { email },
+  });
+  const identityOf = (result: Awaited<ReturnType<typeof identityLogin>>) => {
+    if (result.credential.kind !== "oauth") throw new Error("expected OAuth result");
+    return result.credential.oauth.identity;
+  };
+  for (const method of ["browser", "device"] as const) {
+    test(`${method} normalizes usable strings without changing workspace case`, async () => {
+      const result = await identityLogin(method, codexJwt(claims(" Workspace-Access ", " ACCESS@Example.COM ", " PRO ")),
+        IDENTITY_ID_TOKEN);
+      expect(identityOf(result)).toEqual({ accountId: "Workspace-Access", email: "access@example.com", planType: "pro" });
+      expect(result.accountLabel).toBe("access@example.com");
+    });
+    for (const [label, value] of unusable) {
+      for (const field of ["email", "plan"] as const) {
+        test(`${method} ignores ${label} optional ID ${field} with a valid access workspace`, async () => {
+          const id = field === "email" ? claims(undefined, value, " Team ") : claims(undefined, " ID@Example.COM ", value);
+          const result = await identityLogin(method, codexJwt(claims("Workspace-Access")), codexJwt(id));
+          expect(identityOf(result)).toEqual(field === "email"
+            ? { accountId: "Workspace-Access", planType: "team" }
+            : { accountId: "Workspace-Access", email: "id@example.com" });
+          expect(result.accountLabel).toBe(field === "email" ? "Workspace-Access" : "id@example.com");
+        });
+      }
+      test(`${method} falls back field-wise from ${label} access claims to usable ID strings`, async () => {
+        const result = await identityLogin(method, codexJwt(claims(value, value, value)), IDENTITY_ID_TOKEN);
+        expect(identityOf(result)).toEqual({ accountId: "acct-id-only", email: "id-only@example.com", planType: "team" });
+      });
+      test(`${method} valid access fields beat ${label} ID claims`, async () => {
+        const result = await identityLogin(method, LOGIN_ACCESS, codexJwt(claims(value, value, value)));
+        expect(identityOf(result)).toEqual({ accountId: "acct-login-unit", email: "dev@example.com", planType: "pro" });
+      });
+      test(`${method} rejects ${label} required workspace in both tokens with malformedPayload`, async () => {
+        const error = await bridgeErrorFrom(() => identityLogin(method,
+          codexJwt(claims(value)), codexJwt(claims(value))));
+        expect(error.kind).toBe("malformedPayload");
+        expect(error.refreshedCredential).toBeUndefined();
+      });
+    }
+    for (const [label, value] of unusable.slice(0, 6)) {
+      test(`${method} ignores ${label} nested claim blocks before ID fallback`, async () => {
+        const result = await identityLogin(method, codexJwt({ [authClaim]: value, [profileClaim]: value }), IDENTITY_ID_TOKEN);
+        expect(identityOf(result)).toEqual({ accountId: "acct-id-only", email: "id-only@example.com", planType: "team" });
+      });
+    }
+  }
+  for (const [label, value] of unusable) {
+    test(`usage JWT workspace extraction ignores ${label} optional email and plan`, async () => {
+      const access = codexJwt(claims("Workspace-Usage", value, value));
+      const fetcher = mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: MINIMAL_BODY } });
+      await fetchOpenAICodexUsage({ request: codexUsageRequest({ credential: codexCredential({ access, identity: undefined }) }),
+        fetcher, nowMs: NOW_MS });
+      expect(new Headers(fetcher.calls[0]?.init.headers).get("ChatGPT-Account-Id")).toBe("Workspace-Usage");
+    });
+  }
+});

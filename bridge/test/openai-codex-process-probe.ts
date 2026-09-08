@@ -1,5 +1,8 @@
 /** Test-only compiled surface: actual Codex entry points, synthetic HTTP replies via stdin. */
-import { fetchOpenAICodexUsage, loginOpenAICodex, refreshOpenAICodexCredential } from "../src/providers/openai-codex";
+import { scheduler } from "node:timers/promises";
+import { runLoginSession } from "../src/cli";
+import { lookupAuth } from "../src/dispatch";
+import { fetchOpenAICodexUsage, loginOpenAICodex, openaiCodexAuth, refreshOpenAICodexCredential } from "../src/providers/openai-codex";
 import { BridgeError, PROTOCOL_VERSION, isRecord, parseBridgeRequest } from "../src/protocol";
 import type { AuthEvents } from "../src/dispatch";
 
@@ -43,7 +46,54 @@ const fetcher = async (url: string, init: RequestInit): Promise<Response> => {
   throw new Error("unexpected probe endpoint");
 };
 try {
-  if (action === "usage") {
+  if (action === "session") {
+    // Keep the production registration and login function intact. Only HTTP
+    // and the device clock are replaced, inside this isolated test process.
+    if (lookupAuth("openai-codex") !== openaiCodexAuth) throw new Error("unexpected Codex registration");
+    const platformFetch = globalThis.fetch;
+    const platformWait = scheduler.wait;
+    globalThis.fetch = Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (typeof url !== "string") throw new Error("unexpected fixture URL type");
+      return await fetcher(url, init ?? {});
+    }, { preconnect: platformFetch.preconnect });
+    scheduler.wait = async () => undefined;
+    let firstLine = true;
+    let pendingRead = Promise.withResolvers<string | undefined>();
+    let inputClosed = false;
+    try {
+      process.exitCode = await runLoginSession({
+        readLine: async () => {
+          if (firstLine) {
+            firstLine = false;
+            return JSON.stringify({ schemaVersion: PROTOCOL_VERSION, providerId: "openai-codex",
+              method: input["method"], requestedAtMs: request.requestedAtMs, deadlineAtMs: request.deadlineAtMs });
+          }
+          return await pendingRead.promise;
+        },
+        writeOutput: line => console.log(line),
+        writeEvent: line => {
+          const event: unknown = JSON.parse(line);
+          if (!isRecord(event)) throw new Error("invalid session event");
+          // Never log URLs, codes or prompt values; only event discriminators.
+          console.error(JSON.stringify({ eventType: event["type"] }));
+          if (event["type"] === "openUrl" && typeof event["url"] === "string") {
+            state = new URL(event["url"]).searchParams.get("state") ?? "";
+          }
+          if (event["type"] === "prompt") {
+            const reader = pendingRead;
+            pendingRead = Promise.withResolvers<string | undefined>();
+            reader.resolve(JSON.stringify({ type: "promptResponse", requestId: event["requestId"],
+              value: `synthetic-code#${state}` }));
+          }
+        },
+        closeInput: () => { inputClosed = true; pendingRead.resolve(undefined); },
+      });
+    } finally {
+      globalThis.fetch = platformFetch;
+      scheduler.wait = platformWait;
+      console.error(JSON.stringify({ inputClosed }));
+    }
+  } else if (action === "usage") {
     console.log(JSON.stringify(await fetchOpenAICodexUsage({ request, fetcher, nowMs: request.requestedAtMs })));
   } else {
     let result;
@@ -68,7 +118,7 @@ try {
     ...(error.refreshedCredential !== undefined ? { refreshedCredential: error.refreshedCredential } : {}),
   }));
 }
-if (action === "browser") {
+if (action === "browser" || (action === "session" && input["method"] === "browser")) {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 1455, fetch: () => new Response("cleanup") });
   server.stop(true);
   console.error(JSON.stringify({ cleanup: "port-1455-rebound" }));
