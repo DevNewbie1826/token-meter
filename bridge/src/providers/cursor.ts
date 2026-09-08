@@ -1,6 +1,7 @@
 /**
  * Cursor provider module (auth + usage), hand-ported from the pinned
- * oh-my-pi checkout @ 8500092296621a6826b7136e840f8a59ea338958:
+ * oh-my-pi checkout @ 8500092296621a6826b7136e840f8a59ea338958,
+ * with used-only legacy quota parity @ d720e81fb747132f0b6c6c0f44eafc887552ec7f:
  *
  * - packages/ai/src/registry/oauth/cursor.ts (PKCE + UUID browser login,
  *   auth polling, token refresh, JWT subject/expiry helpers)
@@ -27,7 +28,7 @@
  * - Usage: GET https://api2.cursor.sh/auth/usage with Accept + Bearer,
  *   normalized with OMP's legacy row mapping (used from numRequests / used /
  *   amountUsed / usdUsed; limit from maxRequestUsage / limit / amountLimit /
- *   usdLimit; both required; planUsage / *usd* / *billing* / *stripe* keys
+ *   usdLimit; missing/null caps keep raw used; planUsage / *usd* / *billing* / *stripe* keys
  *   are USD, everything else requests; ids cursor:usd:<key> and
  *   cursor:requests:<lowercased key>).
  * - OAuth-backed fetches additionally synthesize the dashboard session
@@ -40,10 +41,12 @@
  *   plus the on-demand cents row when it carries a positive limit. Resets
  *   come from billingCycleEnd / endOfMonth / resetsAt / nextReset, else
  *   startOfMonth / billingCycleStart / startOfBillingCycle + 1 UTC month.
- * - Severity: OMP usageStatus bands (>=1 exhausted, >=0.9 warning, else ok;
- *   no fraction -> unknown).
+ * - Severity: shared wire bands (>=1 exhausted, >=0.95 critical,
+ *   >=0.8 warning, else ok; no fraction -> unknown).
  *
  * Deviations from the OMP sources (with reasons):
+ * - Reject malformed/negative legacy amounts, nonpositive caps and overflowing
+ *   ratios rather than producing windows the closed Swift wire cannot accept.
  * - OMP races the /auth/usage and dashboard calls and soft-fails both
  *   (fetchCursorJson returns undefined on any error). The bridge contract
  *   requires callProviderHttp with the default status map for every call, so
@@ -89,8 +92,8 @@ import { generatePKCE } from "../auth/pkce";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeCredential, BridgeRequest, BridgeSuccessResponse, OAuthCredential, Severity, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeCredential, BridgeRequest, BridgeSuccessResponse, OAuthCredential, UsageWindow } from "../protocol";
 
 const PROVIDER_ID = "cursor";
 const CONNECTOR_VERSION = "cursor-1";
@@ -144,20 +147,6 @@ function parseIsoTimestamp(value: unknown): number | undefined {
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-/** usageStatus from packages/ai/src/usage/shared.ts (Cursor's severity map). */
-function usageStatus(usedFraction: number | undefined): Severity {
-  if (usedFraction === undefined) {
-    return "unknown";
-  }
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
 }
 
 /** decodeCursorAccessTokenPayload from OMP registry/oauth/cursor.ts. */
@@ -399,7 +388,16 @@ function parseCursorUsage(payload: unknown): CursorLimit[] {
       toNumber(value["limit"]) ??
       toNumber(value["amountLimit"]) ??
       toNumber(value["usdLimit"]);
-    if (usedVal === undefined || limitVal === undefined) {
+    if (usedVal === undefined || usedVal < 0) {
+      continue;
+    }
+    // A genuinely absent cap is not the same as an explicitly malformed one.
+    if (limitVal === undefined && ["maxRequestUsage", "limit", "amountLimit", "usdLimit"].some(
+      key => value[key] !== undefined && value[key] !== null,
+    )) {
+      continue;
+    }
+    if (limitVal !== undefined && (limitVal <= 0 || !Number.isFinite(usedVal / limitVal))) {
       continue;
     }
     const lower = key.toLowerCase();
@@ -410,8 +408,7 @@ function parseCursorUsage(payload: unknown): CursorLimit[] {
       ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
       amount: {
         used: usedVal,
-        limit: limitVal,
-        usedFraction: limitVal > 0 ? usedVal / limitVal : 0,
+        ...(limitVal !== undefined ? { limit: limitVal, usedFraction: usedVal / limitVal } : {}),
         unit: isUsd ? "usd" : "requests",
       },
     });
@@ -610,7 +607,7 @@ function cursorWindowFromLimit(limit: CursorLimit): UsageWindow {
     label: limit.label,
     unit: limit.amount.unit,
     ...(limit.amount.usedFraction !== undefined ? { resolvedFraction: limit.amount.usedFraction } : {}),
-    severity: usageStatus(limit.amount.usedFraction),
+    severity: severityForFraction(limit.amount.usedFraction),
     ...(limit.amount.used !== undefined ? { used: limit.amount.used } : {}),
     ...(limit.amount.limit !== undefined ? { limit: limit.amount.limit } : {}),
     ...(limit.resetsAtMs !== undefined ? { resetsAtMs: limit.resetsAtMs } : {}),

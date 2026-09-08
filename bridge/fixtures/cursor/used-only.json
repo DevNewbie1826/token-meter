@@ -1,0 +1,6 @@
+{
+  "startOfMonth": "2026-08-01T00:00:00.000Z",
+  "coreRequests": { "numRequests": 42.5, "maxRequestUsage": null },
+  "planUsage": { "usdUsed": "12.75" },
+  "zeroRequests": { "used": 0 }
+}
