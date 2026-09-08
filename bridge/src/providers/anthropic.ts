@@ -6,13 +6,17 @@
  * - packages/ai/src/usage/claude.ts                    (usage fetch + normalization)
  * - packages/ai/src/registry/oauth/anthropic.ts        (browser OAuth login + refresh)
  * - packages/ai/src/usage/shared.ts                    (parseIsoTimestamp)
- * - packages/ai/src/providers/claude-code-fingerprint.ts (claudeCodeVersion "2.1.220")
+ * Authentication fingerprints updated from d720e81fb747132f0b6c6c0f44eafc887552ec7f:
+ * - packages/catalog/src/compat/rules/auth/anthropic.kdl (refresh header template)
+ * - packages/ai/src/registry/engine/refresh.ts          (SDK template substitution)
+ * - packages/ai/src/providers/claude-code-fingerprint.ts (CLI 2.1.257, SDK 0.112.1)
+ * Usage normalization remains the earlier port; no ranking/reserve policy is copied.
  *
  * Kept from the OMP sources (same endpoints, client id, request bodies and
  * normalization boundaries):
  * - Usage: GET https://api.anthropic.com/api/oauth/usage with the exact
  *   claude-cli header set (accept, accept-encoding, the long anthropic-beta
- *   list, content-type, user-agent "claude-cli/2.1.220 (external, cli)",
+ *   list, content-type, user-agent "claude-cli/2.1.257 (external, cli)",
  *   connection) and `Bearer <access>`. Best-effort GET
  *   https://api.anthropic.com/api/oauth/profile under OMP's identity-missing
  *   gate.
@@ -22,7 +26,7 @@
  *   (slugified, first occurrence wins, is_active ignored); percent rows clamp
  *   utilization to [0,100] with used/limit 100/100; extra usage comes from
  *   `spend` (newer) or `extra_usage` (legacy) as a USD row; resets_at is ISO
- *   parsed; OMP claude status bands (>=1 exhausted, >=0.9 warning, else ok).
+ *   parsed; severity follows the shared bridge/Swift wire bands.
  * - Browser login: PKCE + state against https://claude.ai/oauth/authorize
  *   with the base64-embedded client id 9d1c250a-e61b-44d9-88ed-5944d1962f5e
  *   and CC's subscription scopes, loopback callback on 127.0.0.1:54545
@@ -35,10 +39,14 @@
  * - Refresh: POST the token URL with {grant_type:refresh_token, client_id,
  *   refresh_token} plus the headers CC sends on refresh only
  *   (anthropic-beta: oauth-2025-04-20, User-Agent
- *   "anthropic-sdk-typescript/0.94.0 userOAuthProvider"); missing
+ *   "anthropic-sdk-typescript/0.112.1 userOAuthProvider"); missing
  *   refresh_token keeps the old one; org identity is never rewritten.
  *
  * Deviations from the OMP sources (with reasons):
+ * - Shared wire severity (warning >=0.8, critical >=0.95, exhausted >=1)
+ *   replaces OMP's status ladder so Swift accepts every normalized window.
+ * - Caller cancellation is rechecked after best-effort bootstrap enrichment:
+ *   an aborted login must not return a successful credential.
  * - OMP's 3-attempt retry loop around the usage fetch (transient statuses,
  *   missing-data re-poll; 429 deliberately excluded) is not ported: the
  *   bridge contract is one deadline-bounded attempt whose typed errors the
@@ -83,8 +91,8 @@ import { generatePKCE } from "../auth/pkce";
 import { callProviderHttp } from "../connectors/provider-http";
 import type { Fetcher } from "../connectors/provider-http";
 import type { AuthEvents, AuthMethod, AuthModule, ConnectorModule, LoginInputs, LoginResult } from "../dispatch";
-import { BridgeError, PROTOCOL_VERSION, isRecord } from "../protocol";
-import type { BridgeCredential, BridgeRequest, BridgeSuccessResponse, OAuthCredential, Severity, UsageWindow } from "../protocol";
+import { BridgeError, PROTOCOL_VERSION, isRecord, severityForFraction } from "../protocol";
+import type { BridgeCredential, BridgeRequest, BridgeSuccessResponse, OAuthCredential, UsageWindow } from "../protocol";
 
 // ---------------------------------------------------------------------------
 // Shared constants (OMP registry/oauth/anthropic.ts + usage/claude.ts)
@@ -110,7 +118,7 @@ const SCOPES =
 
 const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
-const CLAUDE_CODE_VERSION = "2.1.220";
+const CLAUDE_CODE_VERSION = "2.1.257";
 const BOOTSTRAP_MODEL = "claude-opus-4-8";
 /** OMP per-request timeout (postJson / fetchBootstrapIdentity). */
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -119,7 +127,7 @@ const EXPIRY_SAFETY_MARGIN_MS = 5 * 60 * 1000;
 /** Bridge common rule: rotate when the token expires within 60s. */
 const PRE_ROTATE_WINDOW_MS = 60_000;
 
-const REFRESH_USER_AGENT = "anthropic-sdk-typescript/0.94.0 userOAuthProvider";
+const REFRESH_USER_AGENT = "anthropic-sdk-typescript/0.112.1 userOAuthProvider";
 const REFRESH_BETA = "oauth-2025-04-20";
 
 /** OMP CLAUDE_HEADERS, verbatim (plus the Bearer authorization line). */
@@ -174,17 +182,6 @@ function recordField(data: unknown, field: string): unknown {
 function nonEmptyField(data: unknown, field: string): string | undefined {
   const value = recordField(data, field);
   return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-/** OMP buildUsageStatus: >=1 exhausted, >=0.9 warning, else ok. */
-function claudeStatusFor(usedFraction: number): Severity {
-  if (usedFraction >= 1) {
-    return "exhausted";
-  }
-  if (usedFraction >= 0.9) {
-    return "warning";
-  }
-  return "ok";
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +376,7 @@ function percentWindow(args: {
     label: args.label,
     unit: "percent",
     resolvedFraction,
-    severity: claudeStatusFor(resolvedFraction),
+    severity: severityForFraction(resolvedFraction),
     used,
     limit: 100,
     ...(args.bucket?.resetsAt !== undefined ? { resetsAtMs: args.bucket.resetsAt } : {}),
@@ -526,7 +523,7 @@ function extraUsageWindow(payload: Record<string, unknown>): UsageWindow | undef
     label: "Claude Extra Usage",
     unit: "usd",
     ...(parsed.limit !== undefined
-      ? { resolvedFraction: parsed.used / parsed.limit, severity: parsed.used >= parsed.limit ? "exhausted" : claudeStatusFor(parsed.used / parsed.limit) }
+      ? { resolvedFraction: parsed.used / parsed.limit, severity: severityForFraction(parsed.used / parsed.limit) }
       : { severity: "unknown" }),
     used: parsed.used,
     ...(parsed.limit !== undefined ? { limit: parsed.limit } : {}),
@@ -954,6 +951,7 @@ export async function loginAnthropic(
     })();
 
     const identity = await resolveAccountIdentity(data, access, deps.fetcher, signal, { includeOrg: true });
+    throwIfLoginCancelled(signal);
     const identityRecord: Record<string, string> = {};
     if (identity.accountId !== undefined) {
       identityRecord["accountId"] = identity.accountId;

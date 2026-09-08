@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { once } from "node:events";
 import { anthropicAuth, anthropicConnector, fetchAnthropicUsage, loginAnthropic, refreshAnthropicCredential } from "../src/providers/anthropic";
 import { BridgeError } from "../src/protocol";
 import type { BridgeRequest, OAuthCredential, UsageWindow } from "../src/protocol";
@@ -24,7 +25,7 @@ const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 
 const CLAUDE_BETA =
   "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11";
-const CLAUDE_USER_AGENT = "claude-cli/2.1.220 (external, cli)";
+const CLAUDE_USER_AGENT = "claude-cli/2.1.257 (external, cli)";
 
 const RESET_5H = "2026-08-19T18:00:00.000Z";
 const RESET_7D = "2026-08-23T09:30:00.000Z";
@@ -207,6 +208,31 @@ function eventCollector(): {
 // ---------------------------------------------------------------------------
 
 describe("anthropicConnector — quota mapping", () => {
+  test.each([
+    [79.9, "ok"], [80, "warning"], [87.5, "warning"], [89.9, "warning"],
+    [90, "warning"], [94.9, "warning"], [95, "critical"], [99.9, "critical"],
+    [100, "exhausted"], [120, "exhausted"],
+  ] as const)("uses wire severity for percent and USD usage at %s%%", async (percent, severity) => {
+    for (const extra of [
+      { spend: { enabled: true, used: { amount_minor: Math.round(percent * 100), exponent: 2, currency: "USD" },
+        limit: { amount_minor: 10000, exponent: 2, currency: "USD" } } },
+      { extra_usage: { is_enabled: true, used_credits: Math.round(percent * 100), monthly_limit: 10000 } },
+    ]) {
+      const fetcher = mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: {
+        five_hour: { utilization: percent }, seven_day: { utilization: percent },
+        seven_day_opus: { utilization: percent }, seven_day_sonnet: { utilization: percent },
+        limits: [{ kind: "weekly_scoped", percent, scope: { model: { display_name: "Fable" } } }],
+        account_id: "synthetic-account", email: "synthetic@example.invalid", ...extra,
+      } } });
+      const response = await anthropicConnector.fetchUsage({ request: anthropicUsageRequest(), fetcher, nowMs: NOW_MS });
+      expect(response.report.windows).toHaveLength(6);
+      for (const window of response.report.windows) {
+        expect(window.severity).toBe(severity);
+        expect(window.resolvedFraction).toBe(window.unit === "percent" ? Math.min(percent, 100) / 100 : percent / 100);
+      }
+    }
+  });
+
   test("maps the OMP usage payload to normalized windows over the exact upstream call", async () => {
     const fetcher = mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: USAGE_BODY } });
     const request = anthropicUsageRequest();
@@ -304,7 +330,7 @@ describe("anthropicConnector — quota mapping", () => {
         label: "Claude 7 Day",
         unit: "percent",
         resolvedFraction: 88 / 100,
-        severity: "ok",
+        severity: "warning",
         used: 88,
         limit: 100,
       },
@@ -487,7 +513,7 @@ describe("anthropicConnector — OAuth rotation", () => {
     const refreshHeaders = new Headers(refreshCall.init.headers);
     // CC sends these on refresh but not on the initial code exchange.
     expect(refreshHeaders.get("anthropic-beta")).toBe("oauth-2025-04-20");
-    expect(refreshHeaders.get("User-Agent")).toBe("anthropic-sdk-typescript/0.94.0 userOAuthProvider");
+    expect(refreshHeaders.get("User-Agent")).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
     expect(refreshHeaders.get("Content-Type")).toBe("application/json");
     expect(refreshHeaders.get("Authorization")).toBeNull();
     expect(refreshHeaders.get("Accept")).toBeNull();
@@ -663,6 +689,28 @@ describe("anthropicConnector — OAuth rotation", () => {
 // ---------------------------------------------------------------------------
 
 describe("refreshAnthropicCredential", () => {
+  test("current fingerprint is accepted by the refresh endpoint without organization drift", async () => {
+    const credential = freshRotatableCredential();
+    const rotated = await refreshAnthropicCredential({ ...credential, oauth: {
+      ...credential.oauth, identity: { orgId: "stored-org", orgName: "Stored Org" },
+    } }, async (url, init) => {
+      const outgoing = new Request(url, init);
+      expect(outgoing.url).toBe(TOKEN_URL);
+      expect(outgoing.method).toBe("POST");
+      expect(outgoing.headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
+      expect(outgoing.headers.get("Accept")).toBeNull();
+      expect(outgoing.headers.get("Authorization")).toBeNull();
+      expect(await outgoing.json()).toEqual({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: REFRESH });
+      if (outgoing.headers.get("User-Agent") !== "anthropic-sdk-typescript/0.112.1 userOAuthProvider") {
+        return Response.json({ error: "unsupported_client" }, { status: 400 });
+      }
+      return Response.json({ ...REFRESH_BODY, organization: { uuid: "drifted-org", name: "Drifted Org" } });
+    }, new AbortController().signal);
+    expect(rotated).toMatchObject({ kind: "oauth", secret: ROTATED_ACCESS, oauth: {
+      access: ROTATED_ACCESS, refresh: ROTATED_REFRESH, identity: { orgId: "stored-org", orgName: "Stored Org" },
+    } });
+  });
+
   test("refreshes via the OMP refresh grant and keeps the stored org identity", async () => {
     const fetcher = mockFetcher({
       [`POST ${TOKEN_URL}`]: { status: 200, body: { access_token: ROTATED_ACCESS } },
@@ -785,6 +833,46 @@ async function runBrowserFlow(
 }
 
 describe("anthropicAuth — browser login", () => {
+  test("cancellation during bootstrap cannot return a successful credential", async () => {
+    const controller = new AbortController();
+    const collector = eventCollector();
+    const bootstrapReady = new EventTarget();
+    const entered = once(bootstrapReady, "ready", { signal: AbortSignal.timeout(5000) });
+    let redirectUri = "";
+    let state = "";
+    const login = loginAnthropic("browser", {}, {
+      onEvent: event => {
+        collector.events.onEvent(event);
+        if (event.type === "openUrl") {
+          const url = new URL(event.url);
+          redirectUri = url.searchParams.get("redirect_uri") ?? "";
+          state = url.searchParams.get("state") ?? "";
+        }
+      },
+      requestInput: async () => `${AUTH_CODE}#${state}`,
+    }, controller.signal, { fetcher: async (url, init) => {
+      if (url === TOKEN_URL) return Response.json({ access_token: LOGIN_ACCESS, refresh_token: LOGIN_REFRESH });
+      expect(url).toBe(`${BOOTSTRAP_URL}?entrypoint=cli&model=claude-opus-4-8`);
+      const outgoing = new Request(url, init);
+      return await new Promise<Response>((_resolve, reject) => {
+        outgoing.signal.addEventListener("abort", () => reject(outgoing.signal.reason), { once: true });
+        bootstrapReady.dispatchEvent(new Event("ready"));
+      });
+    } });
+    const outcome = Promise.allSettled([login]);
+    try {
+      await entered;
+      controller.abort(new DOMException("cancelled", "AbortError"));
+      const error = await bridgeErrorFrom(() => login);
+      expect(error.kind).toBe("timeout");
+      expect(error.refreshedCredential).toBeUndefined();
+    } finally {
+      controller.abort();
+      await outcome;
+      await expectLoopbackClosed(redirectUri);
+    }
+  });
+
   test("completes the PKCE browser flow and returns the OAuth credential with inline identity", async () => {
     const { result, fetcher, collector, openedUrls, authorizeUrl, redirectUri, state } = await runBrowserFlow({
       [`POST ${TOKEN_URL}`]: { status: 200, body: LOGIN_TOKEN_BODY },
@@ -825,6 +913,8 @@ describe("anthropicAuth — browser login", () => {
     expect(tokenHeaders.get("Content-Type")).toBe("application/json");
     expect(tokenHeaders.get("Authorization")).toBeNull();
     expect(tokenHeaders.get("Accept")).toBeNull();
+    expect(tokenHeaders.get("User-Agent")).toBeNull();
+    expect(tokenHeaders.get("anthropic-beta")).toBeNull();
     const body = JSON.parse(String(tokenCall.init.body)) as Record<string, string>;
     expect(body["grant_type"]).toBe("authorization_code");
     expect(body["client_id"]).toBe(CLIENT_ID);
@@ -895,7 +985,7 @@ describe("anthropicAuth — browser login", () => {
     const headers = new Headers(bootstrapCall.init.headers);
     expect(headers.get("Authorization")).toBe(`Bearer ${LOGIN_ACCESS}`);
     expect(headers.get("anthropic-beta")).toBe("oauth-2025-04-20");
-    expect(headers.get("User-Agent")).toBe("claude-code/2.1.220");
+    expect(headers.get("User-Agent")).toBe("claude-code/2.1.257");
     expect(headers.get("Accept")).toBe("application/json, text/plain, */*");
 
     if (result.credential.kind !== "oauth") {
@@ -1027,7 +1117,7 @@ describe("anthropicAuth — manual paste fallback (OMP onManualCodeInput race)",
     return { redirectUri, state };
   }
 
-  test("resolves the login through a pasted redirect URL on the duplex channel", async () => {
+  test.each(["redirect", "code"] as const)("resolves the login through a pasted %s on the duplex channel", async (format) => {
     const fetcher = mockFetcher({ [`POST ${TOKEN_URL}`]: { status: 200, body: LOGIN_TOKEN_BODY } });
     const collector = eventCollector();
     const pastes = pasteCollector(collector);
@@ -1040,7 +1130,7 @@ describe("anthropicAuth — manual paste fallback (OMP onManualCodeInput race)",
     await Promise.all([collector.waitFor("openUrl"), firstPrompt]);
     const { redirectUri, state } = redirectFrom(collector);
 
-    pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
+    pastes.respond(format === "code" ? `${AUTH_CODE}#${state}` : `${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
     const result = await loginPromise;
     expect(pastes.pendingResponses()).toBe(0);
     await expectLoopbackClosed(redirectUri);
