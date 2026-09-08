@@ -43,7 +43,7 @@ function bridgeErrorFrom(action: () => unknown): BridgeError {
 
 const EXPECTED_WINDOWS = [
   { id: "premium-requests-5h", unit: "requests", resolvedFraction: 0.8, severity: "warning", used: 80, limit: 100, resetsAtMs: 1787014800000 },
-  { id: "core-tokens-5h", unit: "tokens", resolvedFraction: 0.95, severity: "critical" },
+  { id: "core-tokens-5h", unit: "tokens", resolvedFraction: 0.95, severity: "critical", remainingFraction: 0.05 },
   { id: "spend-usd-monthly", unit: "usd", resolvedFraction: 1.2, severity: "exhausted", used: 1200, limit: 1000, resetsAtMs: 1789603200000 },
   { id: "explicit-requests-7d", unit: "requests", resolvedFraction: 0.25, severity: "ok", used: 25, limit: 100 },
   { id: "percent-minutes-weekly", unit: "minutes", resolvedFraction: 0.42, severity: "ok" },
@@ -84,6 +84,7 @@ describe("fetchFixtureUsage — complete fixture", () => {
       }
       expect(window.unit).toBe(expected.unit);
       expect(window.severity).toBe(expected.severity);
+      expect(window.remainingFraction).toBe("remainingFraction" in expected ? expected.remainingFraction : undefined);
       if ("resolvedFraction" in expected) {
         expect(window.resolvedFraction).toBe(expected.resolvedFraction);
       } else {
@@ -119,7 +120,7 @@ describe("fetchFixtureUsage — complete fixture", () => {
     expectNoModelFields(JSON.parse(encoded));
   });
 
-  test("accepts an oauth credential when the 1.2.0 credential union feeds the fixture path", () => {
+  test("accepts an oauth credential when the credential union feeds the fixture path", () => {
     const request = buildUsageRequest({ credential: OAUTH_FIXTURE_CREDENTIAL });
     const response = fetchFixtureUsage({
       request,
@@ -136,6 +137,97 @@ describe("fetchFixtureUsage — complete fixture", () => {
     const response = fetchComplete();
     expect("refreshedCredential" in response).toBe(false);
     expect("refreshedCredential" in JSON.parse(encodeBridgeResponse(response))).toBe(false);
+  });
+});
+
+function fetchWindow(fields: Readonly<Record<string, unknown>>) {
+  return fetchFixtureUsage({
+    request: FIXTURE_REQUEST,
+    nowMs: NOW_MS,
+    fixtureSource: JSON.stringify({
+      snapshotVersion: "remaining-test",
+      fetchedAtMs: NOW_MS,
+      windows: [{ id: "remaining-test", unit: "requests", ...fields }],
+    }),
+  }).report.windows[0];
+}
+
+describe("fetchFixtureUsage - honest remaining quotas", () => {
+  test.each([0, 250, Number.MAX_VALUE])("preserves remaining-only amount %s without fabricating usage", (remaining) => {
+    expect(fetchWindow({ unit: "credits", remaining })).toEqual({
+      id: "remaining-test", unit: "credits", severity: "unknown", remaining,
+    });
+  });
+
+  test("preserves a remaining amount with a denominator without inventing used", () => {
+    expect(fetchWindow({ remaining: 25, limit: 100 })).toEqual({
+      id: "remaining-test", unit: "requests", severity: "unknown", remaining: 25, limit: 100,
+    });
+  });
+
+  test.each([
+    { remainingFraction: 0, resolvedFraction: 1, severity: "exhausted" },
+    { remainingFraction: 0.125, resolvedFraction: 0.875, severity: "warning" },
+    { remainingFraction: 1, resolvedFraction: 0, severity: "ok" },
+  ])("retains remaining fraction $remainingFraction while resolving used fraction", (expected) => {
+    expect(fetchWindow({ remainingFraction: expected.remainingFraction })).toEqual({
+      id: "remaining-test", unit: "requests", ...expected,
+    });
+  });
+
+  test("preserves agreeing amount signals and explicit fraction precedence", () => {
+    expect(fetchWindow({ used: 75, limit: 100, fraction: 0.75, remaining: 25, remainingFraction: 0.25, percentUsed: 10 })).toEqual({
+      id: "remaining-test", unit: "requests", severity: "ok", resolvedFraction: 0.75,
+      used: 75, limit: 100, remaining: 25, remainingFraction: 0.25,
+    });
+  });
+
+  test("retains overage fractions when remaining quota is exhausted", () => {
+    expect(fetchWindow({ used: 120, limit: 100, remaining: 0, remainingFraction: 0 })).toEqual({
+      id: "remaining-test", unit: "requests", severity: "exhausted", resolvedFraction: 1.2,
+      used: 120, limit: 100, remaining: 0, remainingFraction: 0,
+    });
+  });
+
+  test("compares normalized ratios without overflowing large amount sums", () => {
+    expect(fetchWindow({ used: 5e307, remaining: 5e307, limit: 1e308, remainingFraction: 0.5 })).toMatchObject({
+      resolvedFraction: 0.5, remaining: 5e307, remainingFraction: 0.5,
+    });
+  });
+
+  test("accepts floating point rounding within the existing fraction tolerance", () => {
+    expect(fetchWindow({ fraction: 0.7, remaining: 0.1 + 0.2, limit: 1, remainingFraction: 0.3 })).toMatchObject({
+      resolvedFraction: 0.7, remainingFraction: 0.3,
+    });
+  });
+
+  test.each([
+    { remaining: -1 }, { remaining: null }, { remaining: "5" }, { remaining: true },
+    { remaining: Number.NaN }, { remaining: Number.POSITIVE_INFINITY },
+    { remainingFraction: -0.01 }, { remainingFraction: 1.01 }, { remainingFraction: null },
+    { remainingFraction: "0.5" }, { remainingFraction: false },
+    { remainingFraction: Number.NaN }, { remainingFraction: Number.POSITIVE_INFINITY },
+    { remaining: 101, limit: 100 }, { remaining: 1, limit: 0 },
+    { remaining: 1, limit: -1 }, { remaining: 1, limit: null },
+    { remaining: 1, limit: Number.POSITIVE_INFINITY },
+    { remaining: 25, limit: 100, remainingFraction: 0.5 },
+    { remaining: 50, used: 75, limit: 100 },
+    { remaining: 25, limit: 100, fraction: 0.5 },
+    { remainingFraction: 0.5, fraction: 0.25 },
+    { remainingFraction: 0.5, percentUsed: 25 },
+    { used: Number.MAX_VALUE, limit: Number.MIN_VALUE },
+    { remaining: 25, remainingPercent: 25 },
+  ])("rejects malformed remaining quota %#", (fields) => {
+    expect(bridgeErrorFrom(() => fetchWindow(fields)).kind).toBe("malformedPayload");
+  });
+
+  test("rejects an overflowing JSON number rather than emitting null", () => {
+    const fixtureSource = '{"snapshotVersion":"t","fetchedAtMs":1,"windows":[{"id":"overflow","unit":"requests","remaining":1e400}]}';
+    expect(bridgeErrorFrom(() => fetchFixtureUsage({ request: FIXTURE_REQUEST, nowMs: NOW_MS, fixtureSource })).kind).toBe("malformedPayload");
+  });
+
+  test.each([{ used: 1 }, { limit: 100 }, {}])("keeps incomplete fixture snapshots partial %#", (fields) => {
+    expect(bridgeErrorFrom(() => fetchWindow(fields)).kind).toBe("partialPayload");
   });
 });
 

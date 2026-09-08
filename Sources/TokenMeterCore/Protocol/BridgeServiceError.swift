@@ -1,4 +1,4 @@
-// Typed error taxonomy for the `TokenMeter/1.2.0` bridge protocol and the
+// Typed error taxonomy for the `TokenMeter/1.3.0` bridge protocol and the
 // Swift services layered above it (plan: "Protocol decisions" — typed
 // errors). The wire carries a closed set of machine-readable codes; cases
 // the wire cannot parameterize (timeout, authRequired, …) intentionally drop

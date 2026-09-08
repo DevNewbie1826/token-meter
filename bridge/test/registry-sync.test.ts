@@ -196,7 +196,7 @@ describe("OMP pinned source", () => {
 describe("registry version pinning", () => {
   test("pins the registry version independently of the TokenMeter wire version", () => {
     expect(REGISTRY_VERSION).toBe("1.2.0");
-    expect(PROTOCOL_VERSION).toBe("1.2.0");
+    expect(PROTOCOL_VERSION).toBe("1.3.0");
   });
 
   test("providers --format json emits the registry version, not the wire version", async () => {

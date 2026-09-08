@@ -1,4 +1,4 @@
-// Response-side wire types for the TokenMeter/1.2.0 `login --stdin`
+// Response-side wire types for the TokenMeter/1.3.0 `login --stdin`
 // command: the final response object on stdout and newline-delimited
 // AuthEvent progress objects on stderr.
 import Foundation
@@ -110,7 +110,7 @@ public enum LoginResult: Equatable, Sendable {
 
 /// Strict decoder for the login response object written to stdout.
 public struct LoginResponseDecoder: Sendable {
-    public static let protocolSchemaVersion = "1.2.0"
+    public static let protocolSchemaVersion = "1.3.0"
     public static let maximumResponseBytes = 2 * 1024 * 1024
 
     private static let successEnvelopeKeys: Set<String> = [

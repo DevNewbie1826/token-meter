@@ -131,7 +131,7 @@ test("preserves labeled percent-only rows when the sample contains scaled costs 
   // When
   const result = await usage(fetcher);
   // Then: shipped-copy values; no extra USD, model-catalog or lifetime fields.
-  expect(result).toEqual({ schemaVersion: "1.2.0", requestId: request.requestId, providerId: "nekos",
+  expect(result).toEqual({ schemaVersion: "1.3.0", requestId: request.requestId, providerId: "nekos",
     connectorId: "nekos", accountRef: request.accountRef, status: "ok", completedAtMs: NOW,
     report: { productKind: "quota", sourceKind: "firstPartyApi", fetchedAtMs: NOW, connectorVersion: "nekos-1", windows: [
       { id: "nekos:cost_usd:3h:global", label: "전체 · 3시간", unit: "percent", resolvedFraction: 0, severity: "ok" },

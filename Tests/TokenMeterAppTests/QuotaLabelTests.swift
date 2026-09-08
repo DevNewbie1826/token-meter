@@ -45,7 +45,7 @@ final class QuotaLabelTests: XCTestCase {
 
     private func projectedRows(_ windows: [[String: Any]]) throws -> [QuotaRow] {
         let envelope: [String: Any] = [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "requestId": testRequestId,
             "providerId": "nekos",
             "connectorId": "nekos",

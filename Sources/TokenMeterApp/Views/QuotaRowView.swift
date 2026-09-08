@@ -148,6 +148,8 @@ struct QuotaRowView: View {
             "%"
         case .tokens:
             "tokens"
+        case .credits:
+            "credits"
         case .requests:
             "requests"
         case .usd:

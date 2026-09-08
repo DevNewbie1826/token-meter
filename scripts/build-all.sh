@@ -86,7 +86,7 @@ codesign --verify --strict "$QA_APP_DIR" || die "QA bundle code signature invali
 log "smoke testing bundled helper"
 "$BRIDGE_BIN" providers --format json > "$TMP/providers.json"
 
-REQ='{"schemaVersion":"1.2.0","requestId":"00000000-0000-4000-8000-000000000001","operation":"fetchUsage","providerId":"fixture","connectorId":"fixture","accountRef":"00000000-0000-4000-8000-000000000002","requestedAtMs":1787011200000,"deadlineAtMs":1787011210000,"credential":{"kind":"bearer","secret":"demo"}}'
+REQ='{"schemaVersion":"1.3.0","requestId":"00000000-0000-4000-8000-000000000001","operation":"fetchUsage","providerId":"fixture","connectorId":"fixture","accountRef":"00000000-0000-4000-8000-000000000002","requestedAtMs":1787011200000,"deadlineAtMs":1787011210000,"credential":{"kind":"bearer","secret":"demo"}}'
 printf '%s' "$REQ" | "$BRIDGE_BIN" usage --stdin --fixture bridge/fixtures/quota.json > "$TMP/usage.json"
 
 python3 - "$TMP/providers.json" "$TMP/usage.json" "$APP_DIR" <<'PY' || die "helper smoke contract failed"
@@ -96,6 +96,7 @@ ids = [p['id'] for p in providers['providers']]
 assert providers['schemaVersion'] == '1.2.0', providers['schemaVersion']
 assert len(ids) == 17 and len(set(ids)) == 17, ids
 usage = json.load(open(sys.argv[2]))
+assert usage['schemaVersion'] == '1.3.0', usage['schemaVersion']
 assert usage['requestId'] == '00000000-0000-4000-8000-000000000001'
 assert usage['status'] == 'ok', usage.get('status')
 # registry resource smoke contract: the packaged Swift resource ships inside

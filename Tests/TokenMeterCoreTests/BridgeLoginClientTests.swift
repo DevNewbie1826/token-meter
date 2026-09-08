@@ -18,7 +18,7 @@ final class BridgeLoginClientTests: XCTestCase {
             printf '%s\n' '{"type":"pasteHint","detail":"Response received"}' >&2
             printf '%s\n' '{"type":"waiting","detail":"Validating"}' >&2
             printf '%s\n' '{"type":"code","code":"ABCD","verificationUrl":"https://example.com/device"}' >&2
-            printf '%s\n' '{"schemaVersion":"1.2.0","providerId":"synthetic","status":"ok","completedAtMs":1787011200123,"credential":{"kind":"apiKey","secret":"sk-live"},"accountLabel":"Team"}'
+            printf '%s\n' '{"schemaVersion":"1.3.0","providerId":"synthetic","status":"ok","completedAtMs":1787011200123,"credential":{"kind":"apiKey","secret":"sk-live"},"accountLabel":"Team"}'
             """)
         let client = BridgeClient(
             executableURL: helper,
@@ -73,7 +73,7 @@ final class BridgeLoginClientTests: XCTestCase {
             IFS= read -r request_line || exit 3
             printf '%s\n' '{"type":"prompt","requestId":"sensitive-1","prompt":"Paste secret","inputKind":"text","sensitive":true}' >&2
             IFS= read -r prompt_response || exit 3
-            printf '%s\n' '{"schemaVersion":"1.2.0","providerId":"synthetic","status":"error","completedAtMs":1787011200123,"error":{"kind":"invalidRequest","message":"rejected swift-prompt-unit-secret"}}'
+            printf '%s\n' '{"schemaVersion":"1.3.0","providerId":"synthetic","status":"error","completedAtMs":1787011200123,"error":{"kind":"invalidRequest","message":"rejected swift-prompt-unit-secret"}}'
             exit 1
             """)
         let client = BridgeClient(
@@ -104,7 +104,7 @@ final class BridgeLoginClientTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let helper = try makeHelperScript(in: directory, body: """
             IFS= read -r request_line || exit 3
-            printf '%s\n' '{"schemaVersion":"1.2.0","providerId":"synthetic","status":"error","completedAtMs":1787011200123,"error":{"kind":"rateLimited","message":"slow down","retryAfterMs":30000}}'
+            printf '%s\n' '{"schemaVersion":"1.3.0","providerId":"synthetic","status":"error","completedAtMs":1787011200123,"error":{"kind":"rateLimited","message":"slow down","retryAfterMs":30000}}'
             exit 1
             """)
         let client = BridgeClient(

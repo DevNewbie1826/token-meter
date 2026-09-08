@@ -375,7 +375,7 @@ describe("alibaba-token-plan connector — error branches", () => {
 
   test("rejects an absent credential with missingCredential", async () => {
     const request: BridgeRequest = {
-      schemaVersion: "1.2.0",
+      schemaVersion: "1.3.0",
       requestId: "00000000-0000-4000-8000-000000000009",
       operation: "fetchUsage",
       providerId: PROVIDER,

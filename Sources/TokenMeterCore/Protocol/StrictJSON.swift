@@ -55,21 +55,25 @@ enum StrictJSON {
     }
 
     /// Maps a wire error payload `{kind, message, retryAfterMs?}` onto the
-    /// typed taxonomy. Returns nil for codes outside the closed set
-    /// (callers surface that as `malformedPayload("unknown error code: …")`).
+    /// typed taxonomy only after validating every field, including metadata
+    /// the selected error case does not retain.
     static func decodeErrorPayload(_ raw: Any) throws -> BridgeServiceError {
         guard let object = raw as? [String: Any] else {
             throw BridgeServiceError.invalidProtocol("error is not an object")
         }
         try rejectUnknownKeys(object, allowed: ["kind", "message", "retryAfterMs"])
         let code = try requiredString(object["kind"], name: "error kind")
-        let message = object["message"] as? String
+        let message = try requiredString(object["message"], name: "error message")
         var retryAfterMs: Int?
         if let rawRetry = object["retryAfterMs"] {
-            guard let number = rawRetry as? NSNumber, !isBoolean(number) else {
+            // The checked bridge preserves exact Int values without intValue's
+            // truncation/wrapping or a lossy conversion through Double.
+            guard let number = rawRetry as? NSNumber, !isBoolean(number),
+                  number.doubleValue.isFinite,
+                  let value = number as? Int, value >= 0 else {
                 throw BridgeServiceError.invalidProtocol("invalid retryAfterMs")
             }
-            retryAfterMs = number.intValue
+            retryAfterMs = value
         }
         guard let error = BridgeServiceError(wireCode: code, message: message, retryAfterMs: retryAfterMs) else {
             throw BridgeServiceError.malformedPayload("unknown error code: \(code)")

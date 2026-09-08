@@ -321,7 +321,7 @@ describe("zaiConnector — typed error paths", () => {
   test("rejects an absent credential with missingCredential", async () => {
     const fetcher = mockFetcher([]);
     const request: BridgeRequest = {
-      schemaVersion: "1.2.0",
+      schemaVersion: "1.3.0",
       requestId: "00000000-0000-4000-8000-000000000001",
       operation: "fetchUsage",
       providerId: "zai",
@@ -707,23 +707,41 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
   /** AuthEvents whose requestInput records prompts and replays pastes on demand. */
   function pasteCollector(collector: ReturnType<typeof eventCollector>): {
     readonly events: AuthEvents;
+    readonly ready: EventTarget;
     prompts(): readonly { readonly inputKind: string; readonly sensitive: boolean }[];
+    waitForPrompts(count: number, signal: AbortSignal): Promise<void>;
+    pendingResponses(): number;
     respond(paste: string): void;
   } {
     const prompts: { readonly inputKind: string; readonly sensitive: boolean }[] = [];
     const responders: Array<(value: string) => void> = [];
+    const ready = new EventTarget();
     return {
+      ready,
       events: {
         onEvent: collector.events.onEvent,
         requestInput: (prompt, requestSignal) => {
           prompts.push({ inputKind: prompt.inputKind, sensitive: prompt.sensitive });
           expect(requestSignal.aborted).toBe(false);
-          const { promise, resolve } = Promise.withResolvers<string>();
-          responders.push(resolve);
+          const { promise, resolve, reject } = Promise.withResolvers<string>();
+          const respond = (value: string): void => {
+            requestSignal.removeEventListener("abort", onAbort);
+            resolve(value);
+          };
+          const onAbort = (): void => {
+            responders.splice(responders.indexOf(respond), 1);
+            requestSignal.removeEventListener("abort", onAbort);
+            reject(requestSignal.reason);
+          };
+          responders.push(respond);
+          requestSignal.addEventListener("abort", onAbort);
+          ready.dispatchEvent(new Event("ready"));
           return promise;
         },
       },
       prompts: () => prompts,
+      waitForPrompts: (count, signal) => waitForCount(() => prompts.length, count, ready, { signal }),
+      pendingResponses: () => responders.length,
       respond: (paste) => {
         const resolve = responders.shift();
         if (resolve === undefined) {
@@ -761,15 +779,18 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
     const collector = eventCollector();
     const pastes = pasteCollector(collector);
     const controller = new AbortController();
+    const firstPrompt = pastes.waitForPrompts(1, controller.signal);
     const loginPromise = loginZai("browser", {}, pastes.events, controller.signal, {
       fetcher,
       openBrowser: () => undefined,
     });
-    await collector.waitFor("openUrl");
+    await Promise.all([collector.waitFor("openUrl"), firstPrompt]);
     const { redirectUri, state } = redirectFrom(collector);
 
     pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
     const result = await loginPromise;
+    expect(pastes.pendingResponses()).toBe(0);
+    await expectLoopbackClosed(redirectUri);
 
     expect(pastes.prompts()).toEqual([{ inputKind: "redirectUrl", sensitive: true }]);
     // The mint ran to completion over the pasted code: exactly the 5 upstream
@@ -792,35 +813,59 @@ describe("zaiAuth — manual paste fallback (OMP onManualCodeInput race)", () =>
     const collector = eventCollector();
     const pastes = pasteCollector(collector);
     const controller = new AbortController();
+    const firstPrompt = pastes.waitForPrompts(1, controller.signal);
     const loginPromise = loginZai("browser", {}, pastes.events, controller.signal, {
       fetcher,
       openBrowser: () => undefined,
     });
-    await collector.waitFor("openUrl");
+    await Promise.all([collector.waitFor("openUrl"), firstPrompt]);
     const { redirectUri, state } = redirectFrom(collector);
 
-    pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=forged`);
-    await waitForCount(() => pastes.prompts().length, 2);
-    pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
-    await loginPromise;
+    const pendingAtReady: number[] = [];
+    const recordReady = (): void => { pendingAtReady.push(pastes.pendingResponses()); };
+    pastes.ready.addEventListener("ready", recordReady);
+    const retryReady = pastes.waitForPrompts(2, controller.signal);
+    try {
+      pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=forged`);
+      await retryReady;
+      expect(pendingAtReady).toEqual([1]);
+      expect(fetcher.calls).toHaveLength(0);
+      expect(pastes.pendingResponses()).toBe(1);
+      pastes.respond(`${redirectUri}?code=${encodeURIComponent(AUTH_CODE)}&state=${encodeURIComponent(state)}`);
+      await loginPromise;
 
-    expect(pastes.prompts()).toHaveLength(2);
-    const exchangeBody = JSON.parse(String(fetcher.calls[0]?.init.body)) as Record<string, string>;
-    expect(exchangeBody["state"]).toBe(state);
+      expect(pastes.prompts()).toHaveLength(2);
+      const exchangeBody = JSON.parse(String(fetcher.calls[0]?.init.body)) as Record<string, string>;
+      expect(exchangeBody["state"]).toBe(state);
+    } finally {
+      pastes.ready.removeEventListener("ready", recordReady);
+      controller.abort();
+      // Drain the login even when a readiness assertion/timeout fails.
+      await Promise.allSettled([loginPromise, retryReady]);
+      expect(pastes.pendingResponses()).toBe(0);
+      await expectLoopbackClosed(redirectUri);
+    }
   });
 
   test("cancellation while a paste is pending closes the loopback listener", async () => {
     const collector = eventCollector();
     const pastes = pasteCollector(collector);
     const controller = new AbortController();
+    const firstPrompt = pastes.waitForPrompts(1, controller.signal);
     const loginPromise = loginZai("browser", {}, pastes.events, controller.signal, {
       fetcher: mockFetcher([]),
       openBrowser: () => undefined,
     });
-    await collector.waitFor("openUrl");
+    await Promise.all([collector.waitFor("openUrl"), firstPrompt]);
     const { redirectUri } = redirectFrom(collector);
 
-    controller.abort(new Error("user cancelled"));
+    expect(pastes.pendingResponses()).toBe(1);
+    const reason = new Error("user cancelled");
+    const nextPrompt = pastes.waitForPrompts(2, controller.signal);
+    const cancelledPrompt = Promise.allSettled([nextPrompt]);
+    controller.abort(reason);
+    expect(await cancelledPrompt).toEqual([{ status: "rejected", reason }]);
+    expect(pastes.pendingResponses()).toBe(0);
     const error = await bridgeErrorFrom(() => loginPromise);
     expect(error.kind).toBe("timeout");
     expect(error.message).toContain("cancel");

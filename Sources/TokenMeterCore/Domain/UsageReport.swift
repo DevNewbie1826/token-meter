@@ -11,6 +11,7 @@ import Foundation
 public enum UsageUnit: String, Codable, Equatable, Sendable, CaseIterable {
     case percent
     case tokens
+    case credits
     case requests
     case usd
     case minutes
@@ -27,18 +28,28 @@ public enum ProductKind: String, Codable, Equatable, Sendable, CaseIterable {
 }
 
 /// Utilization of a single limit. `fraction` is the resolved utilization in
-/// [0, ∞) when the provider exposed one (explicitly or derived); `used` and
-/// `limit` are the raw amounts when available. A nil `fraction` with amounts
-/// present stays visibly `unknown` severity.
+/// [0, ∞) when the provider exposed one (explicitly or derived). Raw used,
+/// limit, remaining and remainingFraction values are preserved when present.
+/// A remaining amount alone never implies a fraction or denominator.
 public struct Utilization: Equatable, Sendable {
     public let fraction: Double?
     public let used: Double?
     public let limit: Double?
+    public let remaining: Double?
+    public let remainingFraction: Double?
 
-    public init(fraction: Double? = nil, used: Double? = nil, limit: Double? = nil) {
+    public init(
+        fraction: Double? = nil,
+        used: Double? = nil,
+        limit: Double? = nil,
+        remaining: Double? = nil,
+        remainingFraction: Double? = nil
+    ) {
         self.fraction = fraction
         self.used = used
         self.limit = limit
+        self.remaining = remaining
+        self.remainingFraction = remainingFraction
     }
 }
 

@@ -53,6 +53,8 @@ public struct QuotaRow: Equatable, Sendable {
     public let fraction: Double?
     public let used: Double?
     public let limit: Double?
+    public let remaining: Double?
+    public let remainingFraction: Double?
     /// Milliseconds until the window resets, from the injected `nowMs`.
     public let resetsInMs: Int64?
     public let windowSeconds: Int64?
@@ -112,6 +114,8 @@ public struct QuotaProjector: Sendable {
                 fraction: limit.utilization.fraction,
                 used: limit.utilization.used,
                 limit: limit.utilization.limit,
+                remaining: limit.utilization.remaining,
+                remainingFraction: limit.utilization.remainingFraction,
                 resetsInMs: limit.resetsAtMs.map { $0 - nowMs },
                 windowSeconds: limit.windowSeconds,
                 label: limit.label

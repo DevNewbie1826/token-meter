@@ -1,4 +1,4 @@
-// Contract: strict TokenMeter/1.2.0 bridge response decoding, typed
+// Contract: strict TokenMeter/1.3.0 bridge response decoding, typed
 // errors, utilization precedence and request encoding (plan criteria 2 and 4).
 //
 // These tests define the public decoding/encoding surface of TokenMeterCore.
@@ -19,7 +19,7 @@ final class BridgeDecodingTests: XCTestCase {
 
     func testDecodesActualBridgeSuccessEnvelope() throws {
         let data = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "requestId": testRequestId,
             "providerId": "github-copilot",
             "connectorId": "github-copilot",
@@ -179,7 +179,7 @@ final class BridgeDecodingTests: XCTestCase {
         guard case let .report(report) = response else {
             return XCTFail("expected a report, got \(response)")
         }
-        XCTAssertEqual(report.schemaVersion, "1.2.0")
+        XCTAssertEqual(report.schemaVersion, "1.3.0")
         XCTAssertEqual(report.requestId, testRequestId)
         XCTAssertEqual(report.providerId, "fixture")
         XCTAssertEqual(report.connectorId, "fixture")
@@ -500,7 +500,7 @@ final class BridgeDecodingTests: XCTestCase {
         XCTAssertLessThanOrEqual(data.count, UsageRequestEncoder.maximumRequestBytes)
 
         let object = try jsonObject(from: data)
-        XCTAssertEqual(object["schemaVersion"] as? String, "1.2.0")
+        XCTAssertEqual(object["schemaVersion"] as? String, "1.3.0")
         XCTAssertEqual(object["operation"] as? String, "fetchUsage")
         XCTAssertEqual(object["requestId"] as? String, testRequestId)
         XCTAssertEqual(object["providerId"] as? String, "fixture")
@@ -546,6 +546,277 @@ final class BridgeDecodingTests: XCTestCase {
         )
         expectBridgeError(.invalidProtocol("request exceeds 64 KiB")) {
             _ = try UsageRequestEncoder().encode(oversizedRequest)
+        }
+    }
+}
+
+
+extension BridgeDecodingTests {
+    func testMalformedCorrelatedReportRetainsValidatedRotation() throws {
+        let rotation = BridgeCredential.oauth(access: "synthetic-new-access", refresh: "synthetic-new-refresh")
+        for overrides: [String: Any] in [[:], ["report": NSNull()]] {
+            let data = try rawUsageResponseData(windows: [[
+                "id": "a", "unit": "requests", "resolvedFraction": 0.875, "severity": "ok",
+            ]], overrides: overrides, rotation: rotation)
+            do {
+                let response = try UsageResponseDecoder().decode(data, expectingRequestId: testRequestId)
+                guard case .failure(let error) = response else { return XCTFail("malformed report accepted") }
+                XCTAssertTrue(error.refreshedCredential == rotation, "validated rotation was lost")
+                XCTAssertTrue(["malformedPayload", "invalidProtocol"].contains(error.wireCode))
+            } catch {
+                XCTFail("malformed correlated report threw instead of returning attached rotation")
+            }
+        }
+    }
+
+    func testInvalidEnvelopeNeverSalvagesRotation() throws {
+        let rotation = BridgeCredential.oauth(access: "synthetic-new-access", refresh: "synthetic-new-refresh")
+        let cases: [[String: Any]] = [
+            ["schemaVersion": "1.0.0"], ["requestId": "mismatched"],
+            ["requestId": NSNull()], ["providerId": ""], ["connectorId": 1],
+            ["accountRef": NSNull()], ["completedAtMs": false], ["completedAtMs": 0],
+            ["completedAtMs": -1], ["status": "bogus"],
+            ["unexpected": true], ["refreshedCredential": ["kind": "oauth", "secret": "invalid"]],
+        ]
+        for overrides in cases {
+            let data = try rawUsageResponseData(windows: [[
+                "id": "a", "unit": "requests", "resolvedFraction": 0.875, "severity": "ok",
+            ]], overrides: overrides, rotation: rotation)
+            do {
+                let response = try UsageResponseDecoder().decode(data, expectingRequestId: testRequestId)
+                XCTAssertTrue(response.refreshedCredential == nil, "invalid envelope authorized rotation")
+                guard case .failure = response else { return XCTFail("invalid envelope accepted") }
+            } catch let error as BridgeServiceError {
+                XCTAssertTrue(error.refreshedCredential == nil, "invalid envelope authorized rotation")
+            }
+        }
+    }
+
+    func testRawCreditsAndRemainingOnlyRowsDecodeWithoutInventedDenominator() throws {
+        let data = try rawUsageResponseData(windows: [
+            ["id": "credits", "unit": "credits", "used": 80, "limit": 100, "remaining": 20,
+             "remainingFraction": 0.2, "severity": "warning"],
+            ["id": "remaining", "unit": "requests", "remaining": 42, "severity": "unknown"],
+            ["id": "fraction", "unit": "percent", "remainingFraction": 0.125, "severity": "warning"],
+        ])
+        guard case .report(let report) = try UsageResponseDecoder().decode(data) else {
+            return XCTFail("expected report")
+        }
+        XCTAssertEqual(report.limits.map(\.unit.rawValue), ["credits", "requests", "percent"])
+        XCTAssertEqual(report.limits.map(\.utilization.fraction), [0.8, nil, 0.875])
+        XCTAssertNil(report.limits[1].utilization.limit)
+        XCTAssertNil(report.limits[1].utilization.used)
+        XCTAssertEqual(report.limits.map(\.utilization.remaining), [20, 42, nil])
+        XCTAssertEqual(report.limits.map(\.utilization.remainingFraction), [0.2, nil, 0.125])
+    }
+
+    func testRawRatioConsistencyAndPrecedenceBoundaries() throws {
+        let cases: [(Double, String)] = [(0.8, "warning"), (0.875, "warning"), (0.899, "warning"),
+                                       (0.95, "critical"), (0.999, "critical"), (1, "exhausted")]
+        for (fraction, severity) in cases {
+            let explicit = fraction + 5e-10
+            let data = try rawUsageResponseData(windows: [[
+                "id": "a", "unit": "requests", "used": fraction * 1000, "limit": 1000,
+                "remaining": (1 - fraction) * 1000, "remainingFraction": 1 - fraction,
+                "resolvedFraction": explicit, "severity": severity,
+            ]])
+            guard case .report(let report) = try UsageResponseDecoder().decode(data) else {
+                return XCTFail("expected consistent boundary report")
+            }
+            XCTAssertEqual(report.limits[0].utilization.fraction, explicit)
+        }
+        for window: [String: Any] in [
+            ["used": 20, "limit": 100, "resolvedFraction": 0.200000002],
+            ["used": 20, "limit": 100, "remaining": 70],
+            ["used": 20, "limit": 100, "remainingFraction": 0.7],
+            ["remaining": 101, "limit": 100],
+            ["remaining": 20, "limit": 100, "remainingFraction": 0.3],
+            ["resolvedFraction": 0.2, "remainingFraction": 0.7],
+        ] {
+            var entry: [String: Any] = ["id": "a", "unit": "requests", "severity": "ok"]
+            entry.merge(window) { _, new in new }
+            XCTAssertThrowsError(try UsageResponseDecoder().decode(rawUsageResponseData(windows: [entry])))
+        }
+    }
+
+    func testRawInvalidNumericDomainsAndOverflowAreRejected() throws {
+        for key in ["resolvedFraction", "used", "limit", "remaining", "remainingFraction", "resetCredits"] {
+            for value: Any in [-1, NSNull(), true, "1"] {
+                var entry: [String: Any] = ["id": "a", "unit": "requests", "used": 1, "severity": "unknown"]
+                entry[key] = value
+                XCTAssertThrowsError(try UsageResponseDecoder().decode(rawUsageResponseData(windows: [entry])), key)
+            }
+        }
+        for entry: [String: Any] in [
+            ["id": "a", "unit": "requests", "remainingFraction": 1.01, "severity": "ok"],
+            ["id": "a", "unit": "requests", "used": 1e308, "limit": 1e-308, "severity": "exhausted"],
+        ] {
+            XCTAssertThrowsError(try UsageResponseDecoder().decode(rawUsageResponseData(windows: [entry])))
+        }
+    }
+
+    func testZeroDenominatorIsRejectedByWireSchema() throws {
+        let data = try rawUsageResponseData(windows: [[
+            "id": "a", "unit": "requests", "used": 0, "limit": 0, "remaining": 0, "severity": "unknown",
+        ]])
+        XCTAssertThrowsError(try UsageResponseDecoder().decode(data))
+    }
+}
+
+
+extension BridgeDecodingTests {
+    func testMalformedReportWithoutExpectedCorrelationDoesNotSalvage() throws {
+        let data = try rawUsageResponseData(windows: [[
+            "id": "a", "unit": "requests", "used": 1, "severity": "warning",
+        ]], rotation: .oauth(access: "synthetic-rotation"))
+        XCTAssertThrowsError(try UsageResponseDecoder().decode(data)) { error in
+            XCTAssertTrue((error as? BridgeServiceError)?.refreshedCredential == nil)
+        }
+    }
+
+    func testRemainingAmountWithCapacityDoesNotInventUsedFraction() throws {
+        let data = try rawUsageResponseData(windows: [[
+            "id": "a", "unit": "credits", "remaining": 25, "limit": 100, "severity": "unknown",
+        ]])
+        guard case .report(let report) = try UsageResponseDecoder().decode(data) else { return XCTFail("expected report") }
+        let utilization = report.limits[0].utilization
+        XCTAssertNil(utilization.fraction)
+        XCTAssertNil(utilization.used)
+        XCTAssertEqual(utilization.remaining, 25)
+        XCTAssertEqual(utilization.limit, 100)
+    }
+
+    func testRemainingFractionEndpointsAndSaturatedOverage() throws {
+        for (remainingFraction, fraction, severity) in [(1.0, 0.0, "ok"), (0.0, 1.0, "exhausted")] {
+            let data = try rawUsageResponseData(windows: [[
+                "id": "a", "unit": "percent", "remainingFraction": remainingFraction, "severity": severity,
+            ]])
+            guard case .report(let report) = try UsageResponseDecoder().decode(data) else { return XCTFail("expected report") }
+            XCTAssertEqual(report.limits[0].utilization.fraction, fraction)
+        }
+        let data = try rawUsageResponseData(windows: [[
+            "id": "a", "unit": "credits", "used": 120, "limit": 100, "remaining": 0,
+            "remainingFraction": 0, "severity": "exhausted",
+        ]])
+        guard case .report(let report) = try UsageResponseDecoder().decode(data) else { return XCTFail("expected overage") }
+        XCTAssertEqual(report.limits[0].utilization.fraction, 1.2)
+    }
+
+    func testNonfiniteJSONNumbersAndNaNAreRejected() throws {
+        let data = try rawUsageResponseData(windows: [[
+            "id": "a", "unit": "requests", "remaining": 1234567, "severity": "unknown",
+        ]])
+        let template = try XCTUnwrap(String(data: data, encoding: .utf8))
+        for invalid in ["1e309", "-1e309", "NaN", "Infinity"] {
+            let invalidData = Data(template.replacingOccurrences(of: "1234567", with: invalid).utf8)
+            XCTAssertThrowsError(try UsageResponseDecoder().decode(invalidData))
+        }
+    }
+}
+
+extension BridgeDecodingTests {
+    func testDecoderBoundaryRejectsUntrustedEnvelopesWithoutDisclosureOrRotation() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        for (name, data, code) in try decoderBoundaryRejections(rotation: rotation) {
+            assertBoundaryFailure({ try decodeBoundaryResponse(data) }, code: code,
+                                  secrets: rotation.redactionSecrets, scenario: name)
+        }
+    }
+
+    func testDecoderBoundaryUncorrelatedMalformedReportsNeverDiscloseOrSalvage() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        let marker = rotation.secret
+        for (name, window, overrides, code): (String, [String: Any], [String: Any], String) in [
+            ("unit", ["unit": marker], [:], "malformedPayload"),
+            ("severity", ["severity": marker], [:], "malformedPayload"),
+            ("window-key", [marker: true], [:], "invalidProtocol"),
+            ("partial", ["id": marker], [:], "partialPayload"),
+            ("product", [:], ["productKind": marker], "malformedPayload"),
+            ("source", [:], ["sourceKind": marker], "malformedPayload"),
+            ("report-key", [:], [marker: true], "invalidProtocol"),
+        ] {
+            var entry: [String: Any] = ["id": "a", "unit": "requests", "severity": "unknown"]
+            if name != "partial" { entry["used"] = 1 }
+            entry.merge(window) { _, new in new }
+            var envelope = try jsonObject(from: rawUsageResponseData(windows: [entry], rotation: rotation))
+            var report = try XCTUnwrap(envelope["report"] as? [String: Any])
+            report.merge(overrides) { _, new in new }
+            envelope["report"] = report
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            assertBoundaryFailure({ try decodeBoundaryResponse(data, correlated: false) }, code: code,
+                                  secrets: rotation.redactionSecrets, scenario: name)
+        }
+    }
+
+    func testDecoderBoundaryParseErrorWithoutIdentityRemainsTypedButCannotRotate() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        var envelope = try jsonObject(from: usageErrorData(
+            code: "invalidRequest", message: rotation.redactionSecrets.joined(separator: " "),
+            refreshedCredential: rotation
+        ))
+        for key in ["requestId", "providerId", "connectorId", "accountRef"] { envelope.removeValue(forKey: key) }
+        let data = try JSONSerialization.data(withJSONObject: envelope)
+        assertBoundaryFailure({ try decodeBoundaryResponse(data, correlated: false) }, code: "invalidRequest",
+                              secrets: rotation.redactionSecrets, scenario: "parse-error")
+    }
+
+    func testDecoderBoundaryMatchedTypedErrorRetainsRedactedRotation() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        let data = try usageErrorData(code: "upstreamError", message: rotation.redactionSecrets.joined(separator: " "),
+                                      refreshedCredential: rotation)
+        assertBoundaryFailure({ try decodeBoundaryResponse(data) }, code: "upstreamError",
+                              secrets: rotation.redactionSecrets, rotation: rotation, scenario: "matched-control")
+    }
+
+    func testTypedErrorPayloadRejectionsThrowWithoutRotation() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        for scenario in try invalidTypedErrorPayloads(message: rotation.redactionSecrets.joined(separator: " ")) {
+            let data = try rawTypedErrorResponseData(scenario.payload, rotation: rotation)
+            XCTAssertThrowsError(try decodeBoundaryResponse(data), scenario.name) { failure in
+                guard let error = failure as? BridgeServiceError else { return XCTFail("untyped failure: \(scenario.name)") }
+                XCTAssertEqual(error.wireCode, scenario.code, scenario.name)
+                XCTAssertTrue(error.refreshedCredential == nil, "invalid payload authorized rotation: \(scenario.name)")
+                for secret in rotation.redactionSecrets {
+                    XCTAssertFalse(error.wireMessage?.contains(secret) == true, "diagnostic disclosure: \(scenario.name)")
+                }
+            }
+        }
+    }
+
+    func testTypedErrorPayloadValidDomainRetainsMatchedRotation() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString, refresh: UUID().uuidString)
+        for scenario in validTypedErrorPayloads() {
+            let data = try rawTypedErrorResponseData(scenario.payload, rotation: rotation)
+            guard case .failure(let error) = try decodeBoundaryResponse(data) else { return XCTFail(scenario.name) }
+            XCTAssertEqual(error.wireCode, scenario.code, scenario.name)
+            XCTAssertTrue(error.refreshedCredential == rotation, "valid rotation lost: \(scenario.name)")
+            if scenario.code == "rateLimited" {
+                XCTAssertEqual(error.underlyingError, .rateLimited(retryAfterMs: scenario.retry), scenario.name)
+            }
+        }
+    }
+
+    func testTypedErrorPayloadRejectsNonfiniteNumbersAtSharedBoundary() {
+        for value in [Double.infinity, -Double.infinity, Double.nan] {
+            XCTAssertThrowsError(try StrictJSON.decodeErrorPayload([
+                "kind": "rateLimited", "message": "failure", "retryAfterMs": NSNumber(value: value),
+            ])) { failure in
+                guard let error = failure as? BridgeServiceError else { return XCTFail("untyped failure") }
+                XCTAssertEqual(error.wireCode, "invalidProtocol")
+                XCTAssertTrue(error.refreshedCredential == nil)
+            }
+        }
+    }
+
+    func testDecoderBoundaryEachSuppliedIdentityIsEnforcedIndependently() throws {
+        let rotation = BridgeCredential.oauth(access: UUID().uuidString)
+        let data = try usageErrorData(code: "upstreamError", refreshedCredential: rotation)
+        for index in 0..<3 {
+            assertBoundaryFailure({ try UsageResponseDecoder().decode(
+                data, expectingProviderId: index == 0 ? "unrelated" : nil,
+                expectingConnectorId: index == 1 ? "unrelated" : nil,
+                expectingAccountRef: index == 2 ? "unrelated" : nil
+            ) }, code: "invalidProtocol", secrets: rotation.redactionSecrets, scenario: "independent-\(index)")
         }
     }
 }

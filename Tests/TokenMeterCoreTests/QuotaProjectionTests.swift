@@ -231,3 +231,22 @@ final class QuotaProjectionTests: XCTestCase {
         XCTAssertNil(rows[1].resetsInMs)
     }
 }
+
+
+extension QuotaProjectionTests {
+    func testRemainingOnlyAndCreditsProjectIndependentHonestRows() throws {
+        let data = try rawUsageResponseData(windows: [
+            ["id": "credits", "unit": "credits", "used": 80, "limit": 100, "remaining": 20, "severity": "warning"],
+            ["id": "remaining", "unit": "requests", "remaining": 42, "severity": "unknown"],
+        ])
+        guard case .report(let report) = try UsageResponseDecoder().decode(data) else { return XCTFail("expected report") }
+        let rows = QuotaProjector().rows(for: report, nowMs: testNowMs)
+        XCTAssertEqual(rows.map(\.limitId), ["credits", "remaining"])
+        XCTAssertEqual(rows.map(\.fraction), [0.8, nil])
+        XCTAssertEqual(rows.map(\.severity), [.warning, .unknown])
+        XCTAssertNil(rows[1].used)
+        XCTAssertNil(rows[1].limit)
+        XCTAssertEqual(rows.map(\.remaining), [20, 42])
+        XCTAssertEqual(rows.map(\.remainingFraction), [nil, nil])
+    }
+}

@@ -4,16 +4,17 @@ import { PROTOCOL_VERSION } from "../src/protocol";
 import { REGISTRY_VERSION } from "../src/registry";
 
 describe("bundled bridge smoke contract", () => {
-  test("build-all sends wire 1.2.0 while asserting the separate registry schema", () => {
+  test("build-all sends wire 1.3.0 while asserting the separate registry schema", () => {
     const script = readFileSync("../scripts/build-all.sh", "utf8");
     const requestVersion = `"schemaVersion":"${PROTOCOL_VERSION}"`;
     const registryAssertion = "providers['schemaVersion'] == '1.2.0'";
 
-    expect(PROTOCOL_VERSION).toBe("1.2.0");
+    expect(PROTOCOL_VERSION).toBe("1.3.0");
     expect(script).toContain('rm -f bridge/build/token-meter-bridge');
     expect(script).toContain("(cd bridge && bun run build)");
     expect(script).toContain(requestVersion);
     expect(script).toContain(registryAssertion);
+    expect(script).toContain("usage['schemaVersion'] == '1.3.0'");
   });
 
   test("build-all packages the Swift registry resource bundle and asserts its registry version", () => {
@@ -33,6 +34,6 @@ describe("bundled bridge smoke contract", () => {
 
   test("registry version is pinned separately from the wire version", () => {
     expect(REGISTRY_VERSION).toBe("1.2.0");
-    expect(PROTOCOL_VERSION).toBe("1.2.0");
+    expect(PROTOCOL_VERSION).toBe("1.3.0");
   });
 });

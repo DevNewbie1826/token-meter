@@ -6,8 +6,10 @@ import {
   CREDENTIAL_KINDS,
   PROTOCOL_FAMILY,
   PROTOCOL_VERSION,
+  USAGE_UNITS,
   credentialSecrets,
   encodeBridgeResponse,
+  isUsageUnit,
   parseBridgeRequest,
   parseLoginRequest,
   parsePromptResponse,
@@ -78,10 +80,17 @@ function rawLoginRequest(mutate: (request: LoginRequest) => unknown): string {
 
 describe("protocol constants", () => {
   test("pins the versioned family when the bridge protocol is identified", () => {
-    expect(PROTOCOL_VERSION).toBe("1.2.0");
+    expect(PROTOCOL_VERSION).toBe("1.3.0");
     expect(PROTOCOL_FAMILY).toBe("TokenMeter");
-    expect(`${PROTOCOL_FAMILY}/${PROTOCOL_VERSION}`).toBe("TokenMeter/1.2.0");
+    expect(`${PROTOCOL_FAMILY}/${PROTOCOL_VERSION}`).toBe("TokenMeter/1.3.0");
     expect(CREDENTIAL_KINDS).toEqual(["none", "bearer", "apiKey", "oauth"]);
+  });
+
+  test("accepts honest credits while keeping the unit vocabulary closed", () => {
+    expect(USAGE_UNITS).toEqual(["percent", "tokens", "requests", "usd", "minutes", "bytes", "credits", "unknown"]);
+    expect(isUsageUnit("credits")).toBe(true);
+    expect(isUsageUnit("credit")).toBe(false);
+    expect(isUsageUnit("parsecs")).toBe(false);
   });
 });
 
@@ -213,8 +222,8 @@ describe("parseBridgeRequest", () => {
     expect(bridgeErrorFrom(() => parseBridgeRequest(raw)).kind).toBe("invalidProtocol");
   });
 
-  test("rejects a foreign schemaVersion when the payload is not protocol 1.2.0", () => {
-    const raw = rawUsageRequest((request) => ({ ...request, schemaVersion: "1.0.0" }));
+  test.each(["1.0.0", "1.2.0"])("rejects stale usage wire version %s", (schemaVersion) => {
+    const raw = rawUsageRequest((request) => ({ ...request, schemaVersion }));
     expect(bridgeErrorFrom(() => parseBridgeRequest(raw)).kind).toBe("invalidProtocol");
   });
 
@@ -270,8 +279,8 @@ describe("parseLoginRequest", () => {
     expect(bridgeErrorFrom(() => parseLoginRequest(raw)).kind).toBe("invalidRequest");
   });
 
-  test("rejects a foreign schemaVersion when the login payload is not protocol 1.2.0", () => {
-    const raw = rawLoginRequest((login) => ({ ...login, schemaVersion: "1.0.0" }));
+  test.each(["1.0.0", "1.2.0"])("rejects stale login wire version %s", (schemaVersion) => {
+    const raw = rawLoginRequest((login) => ({ ...login, schemaVersion }));
     expect(bridgeErrorFrom(() => parseLoginRequest(raw)).kind).toBe("invalidProtocol");
   });
 

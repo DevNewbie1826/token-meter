@@ -24,7 +24,7 @@ final class LoginProtocolTests: XCTestCase {
             Set(object.keys),
             ["schemaVersion", "providerId", "method", "requestedAtMs", "deadlineAtMs", "inputs"]
         )
-        XCTAssertEqual(object["schemaVersion"] as? String, "1.2.0")
+        XCTAssertEqual(object["schemaVersion"] as? String, "1.3.0")
         XCTAssertEqual(object["providerId"] as? String, "github-copilot")
         XCTAssertEqual(object["method"] as? String, "device")
         XCTAssertEqual(object["requestedAtMs"] as? Int, Int(testNowMs))
@@ -87,7 +87,7 @@ final class LoginProtocolTests: XCTestCase {
 
     func testDecodesLoginSuccessWithNoneCredential() throws {
         let data = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "providerId": "ollama",
             "status": "ok",
             "completedAtMs": testNowMs,
@@ -108,7 +108,7 @@ final class LoginProtocolTests: XCTestCase {
 
     func testDecodesLoginSuccessWithOAuthCredential() throws {
         let data = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "providerId": "anthropic",
             "status": "ok",
             "completedAtMs": testNowMs,
@@ -146,7 +146,7 @@ final class LoginProtocolTests: XCTestCase {
 
     func testDecodesLoginTypedError() throws {
         let data = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "providerId": "synthetic",
             "status": "error",
             "completedAtMs": testNowMs,
@@ -163,6 +163,29 @@ final class LoginProtocolTests: XCTestCase {
         )
     }
 
+    func testTypedErrorPayloadRejectionsThrowInLogin() throws {
+        for scenario in try invalidTypedErrorPayloads(message: "failure") {
+            let data = try rawTypedErrorResponseData(scenario.payload, login: true)
+            XCTAssertThrowsError(try LoginResponseDecoder().decode(data), scenario.name) { failure in
+                guard let error = failure as? BridgeServiceError else { return XCTFail("untyped failure: \(scenario.name)") }
+                XCTAssertEqual(error.wireCode, scenario.code, scenario.name)
+                XCTAssertTrue(error.refreshedCredential == nil)
+            }
+        }
+    }
+
+    func testTypedErrorPayloadValidDomainDecodesInLogin() throws {
+        for scenario in validTypedErrorPayloads() {
+            let data = try rawTypedErrorResponseData(scenario.payload, login: true)
+            guard case .failure(let error) = try LoginResponseDecoder().decode(data) else { return XCTFail(scenario.name) }
+            XCTAssertEqual(error.wireCode, scenario.code, scenario.name)
+            XCTAssertTrue(error.refreshedCredential == nil)
+            if scenario.code == "rateLimited" {
+                XCTAssertEqual(error, .rateLimited(retryAfterMs: scenario.retry), scenario.name)
+            }
+        }
+    }
+
     func testRejectsWrongLoginResponseVersionAndUnknownFields() throws {
         let wrongVersion = try JSONSerialization.data(withJSONObject: [
             "schemaVersion": "1.0.0",
@@ -176,7 +199,7 @@ final class LoginProtocolTests: XCTestCase {
         }
 
         let unknownField = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "providerId": "synthetic",
             "status": "ok",
             "completedAtMs": testNowMs,
@@ -190,7 +213,7 @@ final class LoginProtocolTests: XCTestCase {
 
     func testRejectsInvalidCredentialInLoginSuccess() throws {
         let data = try JSONSerialization.data(withJSONObject: [
-            "schemaVersion": "1.2.0",
+            "schemaVersion": "1.3.0",
             "providerId": "anthropic",
             "status": "ok",
             "completedAtMs": testNowMs,
