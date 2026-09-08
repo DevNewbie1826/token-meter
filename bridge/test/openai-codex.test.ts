@@ -98,7 +98,7 @@ const HAPPY_WINDOWS: readonly UsageWindow[] = [
     label: "7 days",
     unit: "percent",
     resolvedFraction: 96.2 / 100,
-    severity: "warning",
+    severity: "critical",
     used: 96.2,
     limit: 100,
     resetsAtMs: 1787536800000,
@@ -320,7 +320,7 @@ describe("openaiCodexConnector — quota mapping", () => {
     expect(primary?.resetCredits).toBe(2);
   });
 
-  test("maps the OMP severity bands, slug fallback and reset-only windows", async () => {
+  test("maps wire severity bands, slug fallback and reset-only windows", async () => {
     const run = async (body: unknown, credential?: OAuthCredential): Promise<readonly UsageWindow[]> => {
       const fetcher = mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body } });
       const response = await openaiCodexConnector.fetchUsage({
@@ -331,7 +331,7 @@ describe("openaiCodexConnector — quota mapping", () => {
       return response.report.windows;
     };
 
-    // 100% with the shared meter still explicitly allowing stays a warning;
+    // 100% is exhausted even when the shared meter explicitly allows;
     // 250% clamps to 100. Both windows share the rate_limit flags.
     const flagged = await run({
       rate_limit: {
@@ -347,7 +347,7 @@ describe("openaiCodexConnector — quota mapping", () => {
         label: "5 hours",
         unit: "percent",
         resolvedFraction: 1,
-        severity: "warning",
+        severity: "exhausted",
         used: 100,
         limit: 100,
       },
@@ -356,7 +356,7 @@ describe("openaiCodexConnector — quota mapping", () => {
         label: "7 days",
         unit: "percent",
         resolvedFraction: 1,
-        severity: "warning",
+        severity: "exhausted",
         used: 100,
         limit: 100,
       },
@@ -370,7 +370,7 @@ describe("openaiCodexConnector — quota mapping", () => {
       },
     });
     expect(exhausted[0]?.severity).toBe("exhausted");
-    expect(exhausted[1]?.severity).toBe("warning");
+    expect(exhausted[1]?.severity).toBe("critical");
 
     // A non-spark additional meter: slug from the codex_-stripped limit name,
     // fallback window labels without limit_window_seconds, unknown severity
@@ -1471,4 +1471,120 @@ describe("openaiCodex module surface", () => {
   test("fetchUsage is the exported connector entry point", () => {
     expect(openaiCodexConnector.fetchUsage).toBe(fetchOpenAICodexUsage);
   });
+});
+
+// Identity claims intentionally disagree: equal fixtures cannot prove precedence.
+const IDENTITY_ID_TOKEN = codexJwt({
+  "https://api.openai.com/auth": { chatgpt_account_id: "acct-id-only", chatgpt_plan_type: " Team " },
+  "https://api.openai.com/profile": { email: " ID-Only@Example.COM " },
+});
+
+async function identityLogin(method: "browser" | "device", access: string, idToken?: string) {
+  const body = { access_token: access, refresh_token: LOGIN_REFRESH, expires_in: 28800,
+    ...(idToken !== undefined ? { id_token: idToken } : {}) };
+  if (method === "browser") {
+    return (await runLoginFlow({ [`POST ${TOKEN_URL}`]: { status: 200, body } },
+      (state) => `${AUTH_CODE}#${state}`)).result;
+  }
+  const device = await runDeviceLogin({ status: 200, body: DEVICE_AUTHORIZATION },
+    [{ status: 200, body: { authorization_code: AUTH_CODE, code_verifier: "identity-verifier" } }],
+    { status: 200, body });
+  return await device.run();
+}
+
+describe("Codex login identity fallback and refresh isolation", () => {
+  for (const method of ["browser", "device"] as const) {
+    for (const access of ["opaque-access", codexJwt({})]) {
+      test(`${method} uses ID-only account/email for absent access claims (${access === "opaque-access" ? "opaque" : "JWT"})`, async () => {
+        const result = await identityLogin(method, access, IDENTITY_ID_TOKEN);
+        expect(result.credential).toMatchObject({ kind: "oauth", oauth: { identity: {
+          accountId: "acct-id-only", email: "id-only@example.com", planType: "team",
+        } } });
+        expect(result.accountLabel).toBe("id-only@example.com");
+        expect(JSON.stringify(result)).not.toContain(IDENTITY_ID_TOKEN);
+      });
+    }
+    test(`${method} keeps distinct access claims ahead of ID claims`, async () => {
+      const result = await identityLogin(method, LOGIN_ACCESS, IDENTITY_ID_TOKEN);
+      expect(result.credential).toMatchObject({ kind: "oauth", oauth: { identity: {
+        accountId: "acct-login-unit", email: "dev@example.com", planType: "pro",
+      } } });
+    });
+    test(`${method} falls back field-wise when only access email is absent`, async () => {
+      const access = codexJwt({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-access" } });
+      const result = await identityLogin(method, access, IDENTITY_ID_TOKEN);
+      expect(result.credential).toMatchObject({ kind: "oauth", oauth: { identity: {
+        accountId: "acct-access", email: "id-only@example.com", planType: "team",
+      } } });
+    });
+    test(`${method} falls back field-wise when only access account is absent`, async () => {
+      const access = codexJwt({ "https://api.openai.com/profile": { email: " ACCESS@Example.COM " } });
+      const result = await identityLogin(method, access, IDENTITY_ID_TOKEN);
+      expect(result.credential).toMatchObject({ kind: "oauth", oauth: { identity: {
+        accountId: "acct-id-only", email: "access@example.com", planType: "team",
+      } } });
+    });
+    for (const idToken of [undefined, "broken.jwt.payload", codexJwt({})]) {
+      test(`${method} rejects missing identity with unusable ID token (${idToken === undefined ? "absent" : idToken === "broken.jwt.payload" ? "malformed" : "empty"})`, async () => {
+        const error = await bridgeErrorFrom(() => identityLogin(method, "opaque-access", idToken));
+        expect(error.kind).toBe("malformedPayload");
+        expect(error.message).not.toContain("opaque-access");
+        expect(error.message).not.toContain(LOGIN_REFRESH);
+      });
+    }
+  }
+
+  const changedTokens = {
+    access_token: codexJwt({
+      "https://api.openai.com/auth": { chatgpt_account_id: "acct-refresh-access", chatgpt_plan_type: "free" },
+      "https://api.openai.com/profile": { email: "refresh-access@example.com" },
+    }),
+    id_token: IDENTITY_ID_TOKEN, refresh_token: ROTATED_REFRESH, expires_in: 3600,
+  };
+  const identity = { accountId: "acct-login-fixed", email: "login-fixed@example.com", planType: "pro",
+    baseUrl: "https://chatgpt.com/backend-api" };
+
+  test("direct refresh never re-infers identity from distinct access/ID claims", async () => {
+    const fetcher = mockFetcher({ [`POST ${TOKEN_URL}`]: { status: 200, body: changedTokens } });
+    const rotated = await refreshOpenAICodexCredential(codexCredential({ identity }), fetcher, AbortSignal.timeout(5000));
+    expect(rotated).toMatchObject({ kind: "oauth", oauth: { access: changedTokens.access_token, identity } });
+    expect(JSON.stringify(rotated)).not.toContain(IDENTITY_ID_TOKEN);
+  });
+
+  for (const mode of ["preflight", "401", "rateLimited", "noData"] as const) {
+    test(`${mode} rotation preserves login identity in credentials and outgoing usage/reset-credit headers`, async () => {
+      let calls = 0;
+      const fetcher = mockFetcher([
+        { when: `POST ${TOKEN_URL}`, respond: { status: 200, body: changedTokens } },
+        { when: (method, url) => method === "GET" && url === USAGE_URL && ++calls === 1 && mode === "401",
+          respond: { status: 401, body: {} } },
+        { when: `GET ${USAGE_URL}`, respond: mode === "rateLimited" ? { status: 429, body: {} }
+          : { status: 200, body: mode === "noData" ? {} : HAPPY_BODY } },
+        { when: `GET ${RESET_CREDITS_URL}`, respond: { status: 200, body: RESET_CREDITS_BODY } },
+      ]);
+      const run = () => openaiCodexConnector.fetchUsage({ request: codexUsageRequest({
+        credential: codexCredential({ identity, expiresAtMs: mode === "401" ? NOW_MS + 3600000 : NOW_MS }),
+      }), fetcher, nowMs: NOW_MS });
+      const response = mode === "rateLimited" || mode === "noData" ? await bridgeErrorFrom(run) : await run();
+      expect(response.refreshedCredential).toMatchObject({ kind: "oauth", oauth: { identity, access: changedTokens.access_token } });
+      for (const call of fetcher.calls.filter(call => call.method === "GET")) {
+        expect(new Headers(call.init.headers).get("ChatGPT-Account-Id")).toBe(identity.accountId);
+      }
+      expect(JSON.stringify(response)).not.toContain(IDENTITY_ID_TOKEN);
+    });
+  }
+});
+
+describe("Codex closed-wire severity boundaries", () => {
+  for (const [percent, severity] of [[79.9, "ok"], [80, "warning"], [87.5, "warning"],
+    [89.9, "warning"], [95, "critical"], [99.9, "critical"], [100, "exhausted"]] as const) {
+    test(`uses ${severity} at ${percent}% even with explicitly allowed flags`, async () => {
+      const fetcher = mockFetcher({ [`GET ${USAGE_URL}`]: { status: 200, body: { rate_limit: {
+        allowed: true, limit_reached: false, primary_window: { used_percent: percent },
+      } } } });
+      const response = await openaiCodexConnector.fetchUsage({ request: codexUsageRequest(), fetcher, nowMs: NOW_MS });
+      expect(response.report.windows[0]?.resolvedFraction).toBe(percent / 100);
+      expect(response.report.windows[0]?.severity).toBe(severity);
+    });
+  }
 });
