@@ -10,6 +10,8 @@
  * 8500092296621a6826b7136e840f8a59ea338958. Registry sync may confirm or add
  * source metadata, but it can never silently promote support tier,
  * authorization basis or polling policy. No model catalog fields exist here.
+ * Current source discovery is synchronized at d720e81fb747132f0b6c6c0f44eafc887552ec7f;
+ * this does not rewrite the original policy verdicts or provider port history.
  *
  * connectorTransport "builtin-<providerId>" marks the provider as dispatched
  * by its builtin provider module (github-copilot keeps its legacy
@@ -104,6 +106,7 @@ export type ProviderCapability = {
   readonly productKind: RegistryProductKind;
   readonly sourceKind: RegistrySourceKind;
   readonly authorizationBasis: AuthorizationBasis;
+  /** One common unit, or unknown for mixed/unspecified adapter amounts. */
   readonly declaredUnit: UsageUnit;
   readonly declaredWindows: readonly DeclaredWindow[];
   readonly pollingPolicy: PollingPolicy;
@@ -132,8 +135,8 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     productKind: "quota",
     sourceKind: "privateApi",
     authorizationBasis: "subscriptionOAuth",
-    declaredUnit: "percent",
-    declaredWindows: ["5h", "7d"],
+    declaredUnit: "unknown",
+    declaredWindows: ["5h", "7d", "monthly"],
     pollingPolicy: "notPolled",
   },
   {
@@ -145,7 +148,7 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     productKind: "quota",
     sourceKind: "privateApi",
     authorizationBasis: "subscriptionOAuth",
-    declaredUnit: "percent",
+    declaredUnit: "unknown",
     declaredWindows: ["monthly"],
     pollingPolicy: "notPolled",
   },
@@ -171,8 +174,8 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     productKind: "quota",
     sourceKind: "privateApi",
     authorizationBasis: "subscriptionOAuth",
-    declaredUnit: "percent",
-    declaredWindows: ["daily", "weekly"],
+    declaredUnit: "unknown",
+    declaredWindows: ["5h", "daily", "weekly"],
     pollingPolicy: "notPolled",
   },
   {
@@ -288,7 +291,7 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     productKind: "quota",
     sourceKind: "firstPartyApi",
     authorizationBasis: "apiKey",
-    declaredUnit: "requests",
+    declaredUnit: "unknown",
     declaredWindows: ["5h", "7d"],
     pollingPolicy: "notPolled",
   },
@@ -327,7 +330,7 @@ const PROVIDER_CAPABILITIES: readonly ProviderCapability[] = [
     productKind: "quota",
     sourceKind: "privateApi",
     authorizationBasis: "apiKey",
-    declaredUnit: "tokens",
+    declaredUnit: "unknown",
     declaredWindows: ["5h", "7d"],
     pollingPolicy: "notPolled",
   },

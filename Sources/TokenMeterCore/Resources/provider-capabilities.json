@@ -1,6 +1,6 @@
 {
 	"schemaVersion": "1.2.0",
-	"syncedFromSha": "8500092296621a6826b7136e840f8a59ea338958",
+	"syncedFromSha": "d720e81fb747132f0b6c6c0f44eafc887552ec7f",
 	"providers": [
 		{
 			"id": "alibaba-token-plan",
@@ -35,10 +35,11 @@
 			"productKind": "quota",
 			"sourceKind": "privateApi",
 			"authorizationBasis": "subscriptionOAuth",
-			"declaredUnit": "percent",
+			"declaredUnit": "unknown",
 			"declaredWindows": [
 				"5h",
-				"7d"
+				"7d",
+				"monthly"
 			],
 			"pollingPolicy": "notPolled"
 		},
@@ -57,7 +58,7 @@
 			"productKind": "quota",
 			"sourceKind": "privateApi",
 			"authorizationBasis": "subscriptionOAuth",
-			"declaredUnit": "percent",
+			"declaredUnit": "unknown",
 			"declaredWindows": [
 				"monthly"
 			],
@@ -97,8 +98,9 @@
 			"productKind": "quota",
 			"sourceKind": "privateApi",
 			"authorizationBasis": "subscriptionOAuth",
-			"declaredUnit": "percent",
+			"declaredUnit": "unknown",
 			"declaredWindows": [
+				"5h",
 				"daily",
 				"weekly"
 			],
@@ -270,7 +272,7 @@
 			"productKind": "quota",
 			"sourceKind": "firstPartyApi",
 			"authorizationBasis": "apiKey",
-			"declaredUnit": "requests",
+			"declaredUnit": "unknown",
 			"declaredWindows": [
 				"5h",
 				"7d"
@@ -330,7 +332,7 @@
 			"productKind": "quota",
 			"sourceKind": "privateApi",
 			"authorizationBasis": "apiKey",
-			"declaredUnit": "tokens",
+			"declaredUnit": "unknown",
 			"declaredWindows": [
 				"5h",
 				"7d"
