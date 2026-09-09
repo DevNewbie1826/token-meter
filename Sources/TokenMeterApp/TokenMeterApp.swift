@@ -6,9 +6,13 @@ import TokenMeterCore
 @main
 struct TokenMeterApp: App {
     @NSApplicationDelegateAdaptor(TokenMeterAppDelegate.self) private var appDelegate
+#if TOKEN_METER_QA
+    @StateObject private var model = TokenMeterApp.makeModel(scope: "menu")
+#else
     @StateObject private var model = TokenMeterViewModel(
         providerManagementStore: TokenMeterApp.providerManagementStoreForCurrentEnvironment()
     )
+#endif
 
     var body: some Scene {
         MenuBarExtra("Token Meter", systemImage: "gauge.medium") {
@@ -25,6 +29,26 @@ struct TokenMeterApp: App {
 }
 
 extension TokenMeterApp {
+#if TOKEN_METER_QA
+    static func makeModel(scope: String) -> TokenMeterViewModel {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["TOKEN_METER_QA_FIXTURE"] == "1" {
+            let fixtureBridge = NekosQAHost.bridge(environment: environment)
+            return TokenMeterViewModel(
+                bridge: fixtureBridge,
+                providerManagementStore: qaProviderManagementStore(scope: scope),
+                openURL: { url in
+                    // Only offline fixtures suppress opening. Opt-in live QA
+                    // retains its real browser entry point.
+                    if fixtureBridge == nil { NSWorkspace.shared.open(url) }
+                }
+            )
+        }
+        return TokenMeterViewModel(providerManagementStore: scope == "settings"
+            ? qaProviderManagementStore(scope: scope) : defaultProviderManagementStore())
+    }
+#endif
+
     static func providerManagementStoreForCurrentEnvironment() -> ProviderManagementStore? {
 #if TOKEN_METER_QA
         if ProcessInfo.processInfo.environment["TOKEN_METER_QA_FIXTURE"] == "1" {
@@ -50,7 +74,8 @@ extension TokenMeterApp {
                 "TokenMeter-QA-\(ProcessInfo.processInfo.processIdentifier)-\(scope)",
                 isDirectory: true
             )
-        try? FileManager.default.removeItem(at: directory)
+        // The fresh process ID isolates a run. Only paired lifecycle cleanup
+        // removes this store; a later SwiftUI model must not erase it.
         return try? ProviderManagementStore(storageDirectory: directory)
     }
 #endif
@@ -75,7 +100,6 @@ extension TokenMeterApp {
                 "TokenMeter-QA-\(ProcessInfo.processInfo.processIdentifier)-credentials",
                 isDirectory: true
             )
-        try? FileManager.default.removeItem(at: directory)
         return AuthFileCredentialStore(
             fileURL: directory.appendingPathComponent("auth.json", isDirectory: false)
         )
@@ -135,10 +159,7 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
             || environment["TOKEN_METER_QA_OPEN_SETTINGS"] == "1"
         if environment["TOKEN_METER_QA_OPEN_SETTINGS"] == "1" {
             let fixtureBridge = NekosQAHost.bridge(environment: environment)
-            let model = TokenMeterViewModel(
-                bridge: fixtureBridge,
-                providerManagementStore: TokenMeterApp.qaProviderManagementStore(scope: "settings")
-            )
+            let model = TokenMeterApp.makeModel(scope: "settings")
             let showsLiveUsage = environment["TOKEN_METER_QA_LIVE_USAGE"] == "1"
             let hostedRoot: AnyView
             if fixtureBridge != nil {
@@ -185,6 +206,9 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
                     deliverImmediately: true
                 )
             }
+        }
+        if qaHarnessRequested {
+            let distributed = DistributedNotificationCenter.default()
             qaCaptureObserver = distributed.addObserver(
                 forName: Notification.Name("dev.herdr.token-meter.qa.capture-window"),
                 object: nil,
@@ -192,29 +216,28 @@ final class TokenMeterAppDelegate: NSObject, NSApplicationDelegate {
             ) { [weak self] notification in
                 if let target = notification.userInfo?["targetPID"] as? NSNumber,
                    target.int32Value != ProcessInfo.processInfo.processIdentifier { return }
-                guard
-                    let window = self?.qaProviderWindow,
-                    let contentView = window.contentView,
-                    let path = notification.userInfo?["path"] as? String,
-                    let representation = contentView.bitmapImageRepForCachingDisplay(
-                        in: contentView.bounds
-                    )
-                else {
-                    return
+                guard let path = notification.userInfo?["path"] as? String else { return }
+                let requestID = notification.userInfo?["requestID"] as? String ?? UUID().uuidString
+                let state = notification.userInfo?["state"] as? String ?? "legacy-hosted-window"
+                var response: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier,
+                    "requestID": requestID, "path": path, "state": state]
+                do {
+                    // The notification observer is explicitly on OperationQueue.main.
+                    let receipt = try MainActor.assumeIsolated {
+                        let window = try QAWindowCapture.parentWindow(
+                            windowNumber: notification.userInfo?["windowNumber"] as? Int,
+                            hosted: self?.qaProviderWindow, windows: NSApp.windows)
+                        return try QAWindowCapture.capture(parent: window, requestID: requestID,
+                            state: state, path: path, target: notification.userInfo?["target"] as? String)
+                    }
+                    response["receipt"] = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+                } catch {
+                    response["error"] = String(describing: error)
                 }
-                contentView.cacheDisplay(
-                    in: contentView.bounds,
-                    to: representation
-                )
-                let data = representation.representation(
-                    using: .png,
-                    properties: [:]
-                )
-                try? data?.write(to: URL(fileURLWithPath: path), options: .atomic)
                 distributed.postNotificationName(
                     Notification.Name("dev.herdr.token-meter.qa.capture-done"),
                     object: nil,
-                    userInfo: ["pid": ProcessInfo.processInfo.processIdentifier],
+                    userInfo: response,
                     deliverImmediately: true
                 )
             }

@@ -12,7 +12,7 @@ const bridge =
   ?? new URL("../../.omo/build/TokenMeter.app/Contents/Resources/token-meter-bridge", import.meta.url).pathname;
 const now = Date.now();
 const request = {
-  schemaVersion: "1.2.0",
+  schemaVersion: "1.3.0",
   providerId,
   method,
   requestedAtMs: now,
@@ -88,7 +88,7 @@ if (!loginResult.credential) {
 
 const usageNow = Date.now();
 const usage = runBridge(["usage", "--stdin"], {
-  schemaVersion: "1.2.0",
+  schemaVersion: "1.3.0",
   requestId: `live-${providerId}-${method}`,
   operation: "fetchUsage",
   providerId,

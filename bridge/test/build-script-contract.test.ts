@@ -1,9 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { PROTOCOL_VERSION } from "../src/protocol";
-import { REGISTRY_VERSION } from "../src/registry";
+import { REGISTRY_VERSION, listProviderCapabilities } from "../src/registry";
 
 describe("bundled bridge smoke contract", () => {
+  test("QA request producers use wire version independently of registry version", () => {
+    for (const path of ["../scripts/qa/live-login-usage.mjs", "../scripts/qa/runtime-provider-audit.sh"]) {
+      const script = readFileSync(path, "utf8");
+      const versions = [...script.matchAll(/schemaVersion["']?\s*:\s*["']([^"']+)/g)].map(match => match[1]);
+      expect(versions).toHaveLength(2);
+      expect(versions.every(version => version === PROTOCOL_VERSION)).toBe(true);
+    }
+  });
+
+  test("native management selectors enumerate precisely the shipped provider IDs", () => {
+    const driver = readFileSync("../scripts/qa/TokenMeterAXDriver.swift", "utf8");
+    const ids = [...driver.matchAll(/ExpectedProvider\(id: "([^"]+)"/g)].map(match => match[1]).sort();
+    expect(ids).toEqual(listProviderCapabilities().map(provider => provider.id).sort());
+    expect(ids).toHaveLength(17);
+  });
+
+  test("release and QA entrypoints have disjoint QA module graphs", async () => {
+    for (const [entrypoint, expectsQA] of [["src/cli.ts", false], ["qa/provider-parity.ts", true]] as const) {
+      const modules: string[] = [];
+      const build = await Bun.build({ entrypoints: [entrypoint], target: "bun", plugins: [{ name: "module-graph", setup(builder) {
+        builder.onLoad({ filter: /./ }, args => { modules.push(args.path); return undefined; });
+      } }] });
+      expect(build.success).toBe(true);
+      expect(modules.some(path => path.endsWith("/qa/runtime.ts"))).toBe(expectsQA);
+      expect(modules.some(path => path.endsWith("/qa/fixtures.ts"))).toBe(expectsQA);
+      expect(modules.some(path => path.endsWith("/src/providers/index.ts"))).toBe(true);
+    }
+  });
+
   test("build-all sends wire 1.3.0 while asserting the separate registry schema", () => {
     const script = readFileSync("../scripts/build-all.sh", "utf8");
     const requestVersion = `"schemaVersion":"${PROTOCOL_VERSION}"`;

@@ -3,7 +3,7 @@
 #
 # Drives the hosted provider-management window of the compile-time-isolated
 # .omo/build/TokenMeterQA.app twin through the AX driver and records exactly what
-# the driver verified: 16 provider rows, every auth-method action (identifier,
+# the driver verified: 17 provider rows, every auth-method action (identifier,
 # title, enabled), open/cancel of the api-key/browser/device sheets, Alibaba
 # extra fields and duplex prompt UI, GitHub device enterprise-host field, and
 # both Codex methods. The driver enters no credential, persists nothing, and
@@ -40,7 +40,7 @@ record "policy: evidence describes only this run; no prior-transcript claims; no
 [[ -x "$BRIDGE" ]] || blocked "bundled bridge helper is missing"
 [[ -x "$CAPTURE" ]] || blocked "TokenMeterQACapture helper is missing"
 [[ -x "$AX_DRIVER" ]] || blocked "TokenMeterAXDriver helper is missing"
-[[ "$(osascript -e 'tell application "System Events" to get UI elements enabled')" == "true" ]] \
+"$AX_DRIVER" accessibility-check \
   || blocked "Accessibility permission is not enabled for the QA runner"
 
 record "ACTION: compiling QA helpers with -warnings-as-errors"
@@ -62,8 +62,8 @@ if ! PROVIDER_COUNT="$("$BRIDGE" providers --format json \
   | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["providers"]))')"; then
   blocked "bundled bridge providers listing failed"
 fi
-[[ "$PROVIDER_COUNT" == "16" ]] || blocked "bundled bridge lists $PROVIDER_COUNT providers, expected 16"
-record "BUILD: bundled bridge lists 16 providers (registry 1.2.0)"
+[[ "$PROVIDER_COUNT" == "17" ]] || blocked "bundled bridge lists $PROVIDER_COUNT providers, expected 17"
+record "BUILD: bundled bridge lists 17 providers (registry 1.2.0)"
 
 rm -f "$SCREENSHOT"
 if ! driver_output="$("$AX_DRIVER" provider-management "$APP" "$CAPTURE_APP" "$SCREENSHOT" 2>&1)"; then

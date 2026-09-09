@@ -25,7 +25,7 @@ blocked() {
 [[ -x "$APP" ]] || blocked "packaged TokenMeter executable is missing"
 [[ -x "$CAPTURE" ]] || blocked "TokenMeterQACapture helper is missing"
 [[ -x "$AX_DRIVER" ]] || blocked "TokenMeterAXDriver helper is missing"
-[[ "$(osascript -e 'tell application "System Events" to get UI elements enabled')" == "true" ]] \
+"$AX_DRIVER" accessibility-check \
   || blocked "Accessibility permission is not enabled for the QA runner"
 
 rm -f "$SCREENSHOT"

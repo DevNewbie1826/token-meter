@@ -40,7 +40,7 @@ func cleanupNekosApplication(pid: Int32) async throws {
         try await stopOwnedNekosProcess(pid: childPID)
     }
     try await stopOwnedNekosProcess(pid: pid)
-    for scope in ["menu", "settings", "credentials"] {
+    for scope in ["menu", "settings", "credentials", "installation"] {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("TokenMeter-QA-\(pid)-\(scope)")
         if FileManager.default.fileExists(atPath: directory.path) {
@@ -51,7 +51,7 @@ func cleanupNekosApplication(pid: Int32) async throws {
 }
 
 @MainActor
-func launchNekosApplication(path: String) async throws -> NSRunningApplication {
+func launchNekosApplication(path: String, scenario: String? = nil) async throws -> NSRunningApplication {
     let session = UUID().uuidString
     let ready = LaunchEventBox()
     let notifications = DistributedNotificationCenter.default()
@@ -69,6 +69,12 @@ func launchNekosApplication(path: String) async throws -> NSRunningApplication {
     var environment = ["TOKEN_METER_QA_FIXTURE": "1", "TOKEN_METER_QA_OPEN_SETTINGS": "1",
                        "TOKEN_METER_QA_SESSION": session]
     environment["TOKEN_METER_QA_NEKOS_BRIDGE"] = ProcessInfo.processInfo.environment["TOKEN_METER_QA_NEKOS_BRIDGE"]
+    if let scenario {
+        environment["TOKEN_METER_QA_SCENARIO"] = scenario
+        // Parity always uses the compiled QA bundle, not a legacy override.
+        environment.removeValue(forKey: "TOKEN_METER_QA_NEKOS_BRIDGE")
+        if scenario == "empty" { environment.removeValue(forKey: "TOKEN_METER_QA_OPEN_SETTINGS") }
+    }
     configuration.environment = environment
     let bundle = URL(fileURLWithPath: path).deletingLastPathComponent()
         .deletingLastPathComponent().deletingLastPathComponent()

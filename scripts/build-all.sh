@@ -38,16 +38,20 @@ rm -f bridge/build/token-meter-bridge
 (cd bridge && bun run build) >/dev/null
 [[ -x bridge/build/token-meter-bridge ]] || die "bridge helper did not build"
 
+log "building separate offline QA bridge (not shipped in release)"
+(cd bridge && bun x tsc --noEmit -p qa/tsconfig.json)
+bun build --compile bridge/qa/provider-parity.ts --outfile "$TMP/token-meter-qa-bridge" >/dev/null
+
 # ----------------------------------------------------------------- swift ---
 log "building Swift release executable"
-swift build -c release >/dev/null
+swift build -c release -Xswiftc -warnings-as-errors >/dev/null
 [[ -x .build/release/TokenMeterApp ]] || die "Swift release binary did not build"
 [[ -d "$REGISTRY_BUNDLE" ]] || die "Swift registry resource bundle did not build: $REGISTRY_BUNDLE"
 [[ -f "$REGISTRY_BUNDLE/provider-capabilities.json" ]] || die "registry resource provider-capabilities.json missing from $REGISTRY_BUNDLE"
 
 log "building compile-time-isolated Swift QA executable"
 rm -rf "$QA_BUILD_PATH"
-swift build --build-path "$QA_BUILD_PATH" -c release -Xswiftc -DTOKEN_METER_QA >/dev/null
+swift build --build-path "$QA_BUILD_PATH" -c release -Xswiftc -DTOKEN_METER_QA -Xswiftc -warnings-as-errors >/dev/null
 [[ -x "$QA_BUILD_PATH/release/TokenMeterApp" ]] || die "Swift QA binary did not build"
 [[ -f "$QA_REGISTRY_BUNDLE/provider-capabilities.json" ]] || die "QA registry resource missing"
 
@@ -67,6 +71,7 @@ rm -rf "$QA_APP_DIR"
 mkdir -p "$QA_APP_DIR/Contents/MacOS" "$QA_APP_DIR/Contents/Resources"
 cp "$QA_BUILD_PATH/release/TokenMeterApp" "$QA_APP_BIN"
 cp bridge/build/token-meter-bridge "$QA_APP_DIR/Contents/Resources/token-meter-bridge"
+cp "$TMP/token-meter-qa-bridge" "$QA_APP_DIR/Contents/Resources/token-meter-qa-bridge"
 cp -R "$QA_REGISTRY_BUNDLE" "$QA_APP_DIR/Contents/Resources/"
 cp Packaging/Info.plist "$QA_APP_DIR/Contents/Info.plist"
 
@@ -77,6 +82,7 @@ codesign --force --sign - --identifier "$BUNDLE_ID.bin" "$APP_BIN" >/dev/null 2>
 codesign --force --sign - --identifier "$BUNDLE_ID" "$APP_DIR" >/dev/null 2>&1
 codesign --verify --strict "$APP_DIR" || die "bundle code signature invalid"
 codesign --force --sign - --identifier "$BUNDLE_ID.qa.bridge" "$QA_APP_DIR/Contents/Resources/token-meter-bridge" >/dev/null 2>&1
+codesign --force --sign - --identifier "$BUNDLE_ID.qa.offline-bridge" "$QA_APP_DIR/Contents/Resources/token-meter-qa-bridge" >/dev/null 2>&1
 codesign --force --sign - --identifier "$BUNDLE_ID.qa.bin" "$QA_APP_BIN" >/dev/null 2>&1
 codesign --force --sign - --identifier "$BUNDLE_ID.qa" "$QA_APP_DIR" >/dev/null 2>&1
 codesign --verify --strict "$QA_APP_DIR" || die "QA bundle code signature invalid"

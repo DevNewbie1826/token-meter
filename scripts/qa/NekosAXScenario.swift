@@ -75,7 +75,7 @@ private func exerciseNekos(pid: Int32, screenshot: String, baseline: Bool) async
     }) { try setValue(UUID().uuidString, on: field, action: "enter fixture-only key") }
     let save = try requireElement("provider-save-nekos", in: app)
     try signal.wait("fixture-backed registration and real decoded quota rows", until: {
-        contains("전체 · 주간, 18%", in: $0) && contains("fable · 주간, 34%", in: $0)
+        contains("전체 · 주간, 18.39%", in: $0) && contains("fable · 주간, 33.55%", in: $0)
     }) { try perform("register Nekos", on: save) }
     _ = try assertNekosRows(app)
     let refresh = try requireElement("provider-refresh-nekos", in: app)
@@ -106,8 +106,8 @@ private func exerciseNekos(pid: Int32, screenshot: String, baseline: Bool) async
 
 func assertNekosRows(_ app: AXUIElement) throws -> [AXUIElement] {
     let elements = collect(from: app)
-    let labels = ["전체 · 3시간, 0%", "전체 · 일간, 0%", "전체 · 주간, 18%",
-                  "fable · 일간, 0%", "fable · 주간, 34%"]
+    let labels = ["전체 · 3시간, 0%", "전체 · 일간, 0%", "전체 · 주간, 18.39%",
+                  "fable · 일간, 0%", "fable · 주간, 33.55%"]
     var rows: [AXUIElement] = []
     for expected in labels {
         guard let row = elements.first(where: { element in
@@ -122,31 +122,62 @@ func assertNekosRows(_ app: AXUIElement) throws -> [AXUIElement] {
         rows.append(row)
         print("ROW: \(observableText(of: row)) frame=\(bounds)")
     }
-    print("AX-PASS: five independently labeled quota rows; percentages 0/0/18/0/34")
+    print("AX-PASS: five independently labeled quota rows; percentages 0/0/18.39/0/33.55")
     return rows
 }
 
-func captureNekosWindow(for pid: Int32, at path: String) async throws {
+@discardableResult
+func captureNekosWindow(for pid: Int32, at path: String, state: String = "nekos-hosted-window",
+                       target: String? = nil, windowNumber: Int? = nil) async throws -> QACaptureReceipt {
     let done = LaunchEventBox()
+    let requestID = UUID().uuidString
+    let temporary = FileManager.default.temporaryDirectory
+        .appendingPathComponent("TokenMeter-QA-\(pid)-settings")
+        .appendingPathComponent("window-\(requestID).png").path
+    let receiptPath = temporary + ".json"
+    try FileManager.default.createDirectory(at: URL(fileURLWithPath: temporary).deletingLastPathComponent(),
+        withIntermediateDirectories: true)
     let notifications = DistributedNotificationCenter.default()
     let queue = OperationQueue()
     queue.maxConcurrentOperationCount = 1
     let observer = notifications.addObserver(
         forName: Notification.Name("dev.herdr.token-meter.qa.capture-done"), object: nil, queue: queue
     ) { notification in
-        if let captured = notification.userInfo?["pid"] as? NSNumber, captured.int32Value == pid {
+        guard notification.userInfo?["requestID"] as? String == requestID else { return }
+        do {
+            if let error = notification.userInfo?["error"] as? String {
+                throw DriverFailure.captureFailed(error)
+            }
+            guard let json = notification.userInfo?["receipt"] as? String else {
+                throw DriverFailure.captureFailed("missing capture identity")
+            }
+            let encoded = Data(json.utf8)
+            let receipt = try JSONDecoder().decode(QACaptureReceipt.self, from: encoded)
+            try receipt.validate(data: Data(contentsOf: URL(fileURLWithPath: temporary)),
+                requestID: requestID, pid: pid, state: state, path: temporary, target: target)
+            guard windowNumber == nil || receipt.parentWindowID == windowNumber else {
+                throw DriverFailure.captureFailed("requested window identity mismatch")
+            }
+            try encoded.write(to: URL(fileURLWithPath: receiptPath), options: .atomic)
             done.resolve(.success(pid))
-        }
+        } catch { done.resolve(.failure(error)) }
     }
     defer { notifications.removeObserver(observer) }
-    let temporary = FileManager.default.temporaryDirectory
-        .appendingPathComponent("TokenMeter-QA-\(pid)-settings")
-        .appendingPathComponent("window-\(UUID().uuidString).png").path
-    if FileManager.default.fileExists(atPath: path) { try FileManager.default.removeItem(atPath: path) }
+    for output in [path, path + ".json"] where FileManager.default.fileExists(atPath: output) {
+        try FileManager.default.removeItem(atPath: output)
+    }
+    var request: [String: Any] = ["path": temporary, "targetPID": pid,
+        "requestID": requestID, "state": state]
+    request["target"] = target
+    request["windowNumber"] = windowNumber
     notifications.postNotificationName(Notification.Name("dev.herdr.token-meter.qa.capture-window"),
-        object: nil, userInfo: ["path": temporary, "targetPID": pid], deliverImmediately: true)
+        object: nil, userInfo: request, deliverImmediately: true)
     _ = try await done.wait(timeout: 10, label: "native hosted window capture")
     try verifyScreenshot(at: temporary)
+    let receipt = try JSONDecoder().decode(QACaptureReceipt.self,
+        from: Data(contentsOf: URL(fileURLWithPath: receiptPath)))
     try FileManager.default.moveItem(atPath: temporary, toPath: path)
-    print("CAPTURE: native hosted NSWindow pid=\(pid) path=\(path)")
+    try FileManager.default.moveItem(atPath: receiptPath, toPath: path + ".json")
+    print("CAPTURE: native hosted NSWindow pid=\(pid) request=\(requestID) state=\(state) target=\(receipt.target) window=\(receipt.windowID) sha256=\(receipt.sha256) path=\(path)")
+    return receipt
 }

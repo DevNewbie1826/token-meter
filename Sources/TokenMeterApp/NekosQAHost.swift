@@ -12,8 +12,14 @@ struct NekosQAHost: View {
     @State private var completedRefreshes = 0
 
     static func bridge(environment: [String: String]) -> BridgeClient? {
-        guard environment["TOKEN_METER_QA_FIXTURE"] == "1",
-              let executable = environment["TOKEN_METER_QA_NEKOS_BRIDGE"] else { return nil }
+        guard environment["TOKEN_METER_QA_FIXTURE"] == "1" else { return nil }
+        let executable: String
+        if let override = environment["TOKEN_METER_QA_NEKOS_BRIDGE"] {
+            executable = override
+        } else if environment["TOKEN_METER_QA_SCENARIO"] != nil {
+            executable = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/Resources/token-meter-qa-bridge").path
+        } else { return nil }
         return BridgeClient(executableURL: URL(fileURLWithPath: executable))
     }
 
@@ -30,14 +36,14 @@ struct NekosQAHost: View {
             ProviderManagementView(model: model)
             Divider()
             VStack {
-                Text("Fixture-backed Nekos QA - not live upstream")
+                Text("Offline provider QA - not live upstream; management progress is simulated")
                 MenuPanelView(model: model)
                 Text(String(completedRefreshes))
                     .accessibilityIdentifier("nekos-qa-refresh-count")
             }
         }
         .onReceive(model.$refreshingProviderIDs) { providers in
-            let active = providers.contains("nekos")
+            let active = !providers.isEmpty
             if refreshWasActive && !active { completedRefreshes += 1 }
             refreshWasActive = active
         }

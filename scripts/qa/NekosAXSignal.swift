@@ -56,7 +56,10 @@ final class NekosAXSignal {
             if ownsRunLoop { CFRunLoopStop(CFRunLoopGetCurrent()) }
         }
         RunLoop.current.add(timer, forMode: .default)
-        defer { timer.invalidate() }
+        defer {
+            timer.invalidate()
+            self.condition = { _ in false }
+        }
         try action()
         evaluate()
         while !complete && !expired {
@@ -66,7 +69,7 @@ final class NekosAXSignal {
         }
         guard complete else {
             for element in collect(from: application) where role(of: element) != kAXTextFieldRole {
-                print("AX-STATE: role=\(role(of: element)) id=\(identifier(of: element)) label=\(text(kAXDescriptionAttribute, of: element))")
+                print("AX-STATE: role=\(role(of: element)) id=\(identifier(of: element))")
             }
             throw DriverFailure.eventTimeout(label)
         }

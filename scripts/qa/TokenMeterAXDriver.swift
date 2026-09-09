@@ -7,7 +7,7 @@ import Foundation
 // Scenarios:
 //   provider-management <app> <capture-app> <png>
 //     Launches the final app with the hosted provider-management window and,
-//     through real AX actions only, verifies the CURRENT UI: all 16 provider
+//     through real AX actions only, verifies the CURRENT UI: all 17 provider
 //     rows, every auth-method action button (identifier, title, enabled),
 //     open/cancel of the API-key, browser and device sheets, the Alibaba
 //     extra fields plus duplex prompt UI, GitHub's device enterprise-host
@@ -365,13 +365,8 @@ func verifyVisibleWindow(for expectedPID: Int32, screenshotPath: String) throws 
 }
 
 func verifyScreenshot(at screenshotPath: String) throws {
-    guard
-        let attributes = try? FileManager.default.attributesOfItem(atPath: screenshotPath),
-        let size = attributes[.size] as? NSNumber,
-        size.intValue > 0
-    else {
-        throw DriverFailure.captureFailed("PNG was not created")
-    }
+    let image = try QACaptureReceipt.decodePNG(Data(contentsOf: URL(fileURLWithPath: screenshotPath)))
+    print("PNG: decoded=\(image.width)x\(image.height) path=\(screenshotPath)")
 }
 
 func captureFrontmostWindow(for pid: Int32, at screenshotPath: String) throws {
@@ -459,7 +454,7 @@ func removeLiveKimiRegistration(application: AXUIElement) throws {
     print("CLEANUP: provider=kimi-code keychain+metadata=removed")
 }
 
-// MARK: - Expected catalog (locked registry 1.2.0, 16 providers)
+// MARK: - Expected catalog (locked registry 1.2.0, 17 providers)
 
 struct ExpectedProvider {
     let id: String
@@ -495,6 +490,7 @@ let expectedProviders: [ExpectedProvider] = [
     ExpectedProvider(id: "google-gemini-cli", displayName: "Google Gemini CLI", methods: ["browser"]),
     ExpectedProvider(id: "kimi-code", displayName: "Kimi Code", methods: ["device", "apiKey"]),
     ExpectedProvider(id: "minimax-code", displayName: "MiniMax Code", methods: ["apiKey"]),
+    ExpectedProvider(id: "nekos", displayName: "Nekos", methods: ["apiKey"]),
     ExpectedProvider(id: "ollama", displayName: "Ollama", methods: ["apiKey"]),
     ExpectedProvider(id: "ollama-cloud", displayName: "Ollama Cloud", methods: ["apiKey"]),
     ExpectedProvider(id: "openai-codex", displayName: "OpenAI Codex", methods: ["browser", "device"]),
@@ -645,14 +641,14 @@ func gatherRowEvidence(_ application: AXUIElement) throws -> (RowEvidence, ListS
     while Date() < settleDeadline {
         scanRows(into: &evidence, application: application)
         let counts = (evidence.allActionIds.count, evidence.idCaptions.count)
-        if counts == previousCounts, counts.0 >= 16 { break }
+        if counts == previousCounts, counts.0 >= 17 { break }
         previousCounts = counts
         CFRunLoopRunInMode(.defaultMode, 0.3, true)
     }
     let controller = try ListScrollController(application: application)
     let expectedIds = Set(expectedProviders.flatMap(\.actionIdentifiers))
     if evidence.allActionIds != expectedIds {
-        print("NOTICE: list virtualizes rows; sweeping with real scroll events to enumerate all 16")
+        print("NOTICE: list virtualizes rows; sweeping with real scroll events to enumerate all 17")
         var stagnantBatches = 0
         for _ in 0..<40 {
             let before = evidence.allActionIds.count
@@ -688,14 +684,14 @@ func exerciseProviderManagement(_ application: AXUIElement) throws {
         throw DriverFailure.missingElement("provider-management-window")
     }
     let headerElements = collect(from: application)
-    for expected in ["프로바이더 관리", "OMP usage registry에서 동기화한 16개 프로바이더입니다", "모델 목록은 가져오지 않습니다"] {
+    for expected in ["프로바이더 관리", "OMP usage registry에서 동기화한 17개 프로바이더입니다", "모델 목록은 가져오지 않습니다"] {
         guard contains(expected, in: headerElements) else {
             throw DriverFailure.missingElement(expected)
         }
     }
     print("WINDOW: provider-management-window present; header copy verified")
 
-    // 2. All 16 rows, every auth-method action, titles, enabled state.
+    // 2. All 17 rows, every auth-method action, titles, enabled state.
     let (evidence, list) = try gatherRowEvidence(application)
     let expectedActionIds = Set(expectedProviders.flatMap(\.actionIdentifiers))
     for provider in expectedProviders {
@@ -736,7 +732,7 @@ func exerciseProviderManagement(_ application: AXUIElement) throws {
             "sheets/registrations leaked into the row list: \(registeredArtifacts)"
         )
     }
-    print("ROWS: present=16 unique=16 expected=16; action-identifiers expected=\(expectedActionIds.count) unexpected=0 disabled=0")
+    print("ROWS: present=17 unique=17 expected=17; action-identifiers expected=\(expectedActionIds.count) unexpected=0 disabled=0")
 
     // 3. Plain API-key sheet: fields visible, closed without saving.
     try list.ensureRowRealized("provider-action-opencode-go")
@@ -874,7 +870,7 @@ func exerciseProviderManagement(_ application: AXUIElement) throws {
     try openOAuthSheetAndCancel(application, list: list, providerID: "openai-codex", method: "browser")
     try openOAuthSheetAndCancel(application, list: list, providerID: "openai-codex", method: "device")
 
-    print("PASS: 16 rows enumerated; \(expectedActionIds.count) auth-method actions verified (identifier, title, enabled)")
+    print("PASS: 17 rows enumerated; \(expectedActionIds.count) auth-method actions verified (identifier, title, enabled)")
     print("PASS: api-key/browser/device sheets open and cancel; alibaba extra fields + duplex prompts; codex browser+device; github device enterprise-host field")
     print("PASS: no credential value was entered or persisted; device codes and verification URLs were never printed")
 }
@@ -1169,6 +1165,15 @@ func launchApp(scenario: Scenario, path: String) async throws -> (process: Proce
 @MainActor
 func run() async throws {
     let arguments = CommandLine.arguments
+    if arguments.dropFirst().first == "accessibility-check" {
+        guard AXIsProcessTrusted() else { throw DriverFailure.accessibilityDisabled }
+        print("PASS: Accessibility enabled for this exact AX driver")
+        return
+    }
+    if arguments.count > 1, ["provider-parity", "provider-management", "quota-panel"].contains(arguments[1]) {
+        try await runProviderParity(arguments)
+        return
+    }
     if arguments.dropFirst().first == "nekos-cleanup-test" {
         try await testNekosProcessCleanup()
         return
