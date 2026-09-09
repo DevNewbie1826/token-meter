@@ -98,10 +98,12 @@ final class QuotaLabelTests: XCTestCase {
         let row = try XCTUnwrap(rows.first)
         // When: evaluate the actual SwiftUI body after decoding and projection.
         let strings = try renderedStrings(of: row)
-        // Then: the uncapped finite percentage renders, still exhausted.
+        // Then: the uncapped finite percentage renders, still exhausted. The
+        // shared 0...2-decimal formatter also groups digits (as the used/limit
+        // display always has), so strip grouping before parsing.
         let percentages = strings.compactMap { text -> Double? in
             guard let percent = text.firstIndex(of: "%") else { return nil }
-            return Double(text[..<percent])
+            return Double(text[..<percent].replacingOccurrences(of: ",", with: ""))
         }
         XCTAssertEqual(percentages.count, 1)
         XCTAssertEqual(try XCTUnwrap(percentages.first), usedPercent, accuracy: 1e292)
@@ -110,7 +112,9 @@ final class QuotaLabelTests: XCTestCase {
     }
 
     func testRenderedPercentageWhenOrdinaryOrOverLimit() throws {
-        for (fraction, expected) in [(0.0, 0.0), (0.1839, 18.0), (0.3355, 34.0), (1.25, 125.0)] {
+        // Display keeps up to two decimals (the shared formatter), so boundary
+        // values such as 0.7999 render as 79.99 instead of crossing a band as 80.
+        for (fraction, expected) in [(0.0, 0.0), (0.1839, 18.39), (0.3355, 33.55), (1.25, 125.0)] {
             // Given
             let rows = try projectedRows([window(id: "overall-daily", fraction: fraction)])
             // When
@@ -118,7 +122,7 @@ final class QuotaLabelTests: XCTestCase {
             // Then: assert the numeric display, not its surrounding prose.
             let percentages = strings.compactMap { text -> Double? in
                 guard let percent = text.firstIndex(of: "%") else { return nil }
-                return Double(text[..<percent])
+                return Double(text[..<percent].replacingOccurrences(of: ",", with: ""))
             }
             XCTAssertEqual(percentages, [expected])
         }

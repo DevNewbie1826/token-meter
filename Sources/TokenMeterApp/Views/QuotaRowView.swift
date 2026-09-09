@@ -47,6 +47,7 @@ struct QuotaRowView: View {
         .accessibilityLabel(
             "\(windowLabel), \(amountLabel), \(severityLabel), \(resetLabel ?? "리셋 정보 없음")"
         )
+        .accessibilityIdentifier("quota-row-\(row.limitId)")
     }
 
     private var clampedFraction: Double {
@@ -76,13 +77,24 @@ struct QuotaRowView: View {
 
     private var amountLabel: String {
         if let fraction = row.fraction {
-            return "\(String(format: "%.0f", (fraction * 100).rounded()))% 사용"
+            // The shared 0...2-decimal formatter keeps boundary percentages
+            // such as 79.99/94.99/99.99 visually inside their severity bands
+            // instead of rounding across them.
+            return "\(formatted(fraction * 100))% 사용"
         }
         if let used = row.used, let limit = row.limit {
             return "\(formatted(used)) / \(formatted(limit)) \(unitLabel)"
         }
         if let used = row.used {
             return "\(formatted(used)) \(unitLabel) 사용"
+        }
+        // A known remaining amount is honest data even when used/fraction are
+        // absent (including zero); only genuinely absent figures stay unknown.
+        if let remaining = row.remaining, let limit = row.limit {
+            return "\(formatted(remaining)) / \(formatted(limit)) \(unitLabel) 남음"
+        }
+        if let remaining = row.remaining {
+            return "\(formatted(remaining)) \(unitLabel) 남음"
         }
         return "사용량 알 수 없음"
     }
