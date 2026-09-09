@@ -40,7 +40,7 @@ struct MenuPanelView: View {
                 }
             }
         }
-        .frame(width: 420, height: 520)
+        .frame(width: 420, height: 520, alignment: .top)
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("token-meter-menu-panel")
     }
