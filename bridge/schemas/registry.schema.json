@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://token-meter.app/schemas/TokenMeter/1.2.0/registry.schema.json",
   "title": "TokenMeter/1.2.0 provider capability registry",
-  "description": "Capability metadata for the locked provider set. Carries no model catalog, no credentials and no endpoint policy. connectorTransport \"builtin-<providerId>\" marks a provider dispatched by its builtin provider module; authMethods/credentialKinds mirror the auth surface the module implements. The unreviewed enum members appear only on newly discovered providers pending capability review; sync may never promote support tier, authorization basis or polling policy on its own. Pending-review providers carry empty authMethods/credentialKinds until a module exists. The registry schemaVersion is versioned independently from the TokenMeter bridge wire schemaVersion in common.schema.json.",
+  "description": "Capability metadata for the 17 reviewed implementations. Carries no model catalog, credentials or pending discovery fields. Newly discovered integrations belong exclusively to discovery.schema.json, never this shipped manifest or listing. Sync may never promote support, authorization or polling policy. declaredUnit is unknown for mixed or unspecified amounts; individual usage windows retain their actual units. Registry schemaVersion is independent from the bridge wire schemaVersion.",
   "$defs": {
     "supportTier": { "enum": ["supported", "bestEffort", "conditional", "excluded"] },
     "connectorTransport": {
@@ -87,8 +87,7 @@
           "items": { "$ref": "#/$defs/declaredWindow" },
           "uniqueItems": true
         },
-        "pollingPolicy": { "$ref": "#/$defs/pollingPolicy" },
-        "pendingCapabilityReview": { "const": true }
+        "pollingPolicy": { "$ref": "#/$defs/pollingPolicy" }
       }
     },
     "providersListing": {
@@ -114,7 +113,8 @@
         "syncedFromSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "providers": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 17,
+          "maxItems": 17,
           "items": { "$ref": "#/$defs/providerCapability" }
         }
       }

@@ -1,0 +1,21 @@
+{
+	"schemaVersion": "1.0.0",
+	"syncedFromSha": "d720e81fb747132f0b6c6c0f44eafc887552ec7f",
+	"pendingProviders": [
+		{
+			"id": "cline-pass",
+			"adapterSourcePath": "packages/ai/src/usage/cline-pass.ts",
+			"reviewStatus": "pendingCapabilityReview"
+		},
+		{
+			"id": "devin",
+			"adapterSourcePath": "packages/ai/src/usage/devin.ts",
+			"reviewStatus": "pendingCapabilityReview"
+		},
+		{
+			"id": "muse-code",
+			"adapterSourcePath": "packages/ai/src/usage/muse-code.ts",
+			"reviewStatus": "pendingCapabilityReview"
+		}
+	]
+}

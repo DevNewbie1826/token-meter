@@ -66,7 +66,7 @@ struct ProviderLoginFieldView: View {
         switch field.kind {
         case .apiKey: field.isOptional ? "비워 둘 수 있음" : "API 키 입력"
         case .cookieHeader: "login_aliyunid_csrf=…; login_aliyunid_tt=…"
-        case .apiBaseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        case .apiBaseUrl: "API 기준 URL 입력 (선택 사항)"
         case .enterpriseHost: "ghe.example.com"
         }
     }

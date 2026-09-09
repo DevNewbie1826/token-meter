@@ -65,6 +65,15 @@ else
   printf 'PASS: release app contains no QA environment controls\n'
 fi
 
+if [[ -e "$ROOT/Contents/Resources/token-meter-qa-bridge" ]]; then
+  fail "release bundle contains the test-only QA bridge"
+fi
+if [[ -f "$BRIDGE_BINARY" ]] && strings "$BRIDGE_BINARY" | grep -Fq 'TOKEN_METER_QA_SCENARIO'; then
+  fail "release bridge includes the offline QA entry"
+else
+  printf 'PASS: release bridge excludes offline QA entry\n'
+fi
+
 # The packaged provider registry resource (provider-capabilities.json) must
 # ship inside the Swift resource bundle, carry the locked registry version,
 # and agree with the bundled bridge's own `providers --format json` listing

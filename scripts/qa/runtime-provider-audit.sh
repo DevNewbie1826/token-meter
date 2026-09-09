@@ -2,7 +2,7 @@
 # Uncredentialed runtime audit of the bundled bridge CLI.
 #
 # Runs the exact helper shipped inside the final .omo/build/TokenMeter.app:
-#   - providers listing must carry 16 unique providers whose auth methods
+#   - providers listing must carry 17 unique providers whose auth methods
 #     match the packaged registry resource;
 #   - every provider must be registered in the dispatch layer (a login with
 #     an unoffered method must return the typed invalidRequest, never
@@ -98,7 +98,7 @@ def run_probes_section(title):
 def login_request(provider, method, inputs=None):
     now = int(time.time() * 1000)
     request = {
-        "schemaVersion": "1.2.0",
+        "schemaVersion": "1.3.0",
         "providerId": provider,
         "method": method,
         "requestedAtMs": now,
@@ -131,7 +131,7 @@ def usage_credential(provider):
 def usage_request(provider, credential):
     now = int(time.time() * 1000)
     request = {
-        "schemaVersion": "1.2.0",
+        "schemaVersion": "1.3.0",
         "requestId": str(uuid.uuid4()),
         "operation": "fetchUsage",
         "providerId": provider,
@@ -321,8 +321,8 @@ out(f"$ {bridge} providers --format json")
 out(f"exit_code={listing.returncode}")
 out(f"provider_count={len(ids)} provider_unique_count={len(set(ids))}")
 out(f"provider_ids={','.join(sorted(ids))}")
-out("listing_result=" + ("PASS" if listing_ok and len(ids) == 16 and len(set(ids)) == 16 else "FAIL"))
-if not (listing_ok and len(ids) == 16 and len(set(ids)) == 16):
+out("listing_result=" + ("PASS" if listing_ok and len(ids) == 17 and len(set(ids)) == 17 else "FAIL"))
+if not (listing_ok and len(ids) == 17 and len(set(ids)) == 17):
     failures.append("providers listing")
 
 registry = json.load(open(registry_path))
@@ -351,8 +351,8 @@ for provider in sorted(registry_methods):
     )
     if not ok:
         failures.append(f"dispatch {provider}")
-out(f"providers_registered={registered}/16")
-if registered != 16:
+out(f"providers_registered={registered}/17")
+if registered != 17:
     failures.append("dispatch registration incomplete")
 
 # ------------------------------------------------- browser/device cancels --
@@ -475,15 +475,15 @@ out(f"usage_connectors={'PASS' if all(usage_rows) else 'FAIL'} "
 # ---------------------------------------------------------------- summary --
 out("")
 out("## PASS/FAIL summary")
-out(f"providers_listing={'PASS' if len(ids) == 16 and len(set(ids)) == 16 else 'FAIL'} (16 listed, 16 unique)")
+out(f"providers_listing={'PASS' if len(ids) == 17 and len(set(ids)) == 17 else 'FAIL'} (17 listed, 17 unique)")
 out(f"registry_agreement={'PASS' if methods_match else 'FAIL'}")
-out(f"dispatch_registration={'PASS' if registered == 16 else 'FAIL'} (16/16 providers resolve to auth modules)")
+out(f"dispatch_registration={'PASS' if registered == 17 else 'FAIL'} (17/17 providers resolve to auth modules)")
 login_ok_count = sum(1 for _, _, ok in login_rows if ok)
 out(f"login_probes={'PASS' if login_ok_count == len(login_rows) else 'FAIL'} ({login_ok_count}/{len(login_rows)} typed outcomes; no crash/hang/invalidProvider)")
 cancel_ok_count = sum(1 for ok in cancel_rows if ok)
 out(f"browser_device_cancel={'PASS' if cancel_ok_count == len(cancel_rows) == 10 else 'FAIL'} ({cancel_ok_count}/{len(cancel_rows)} emitted the expected first event and were reaped by SIGTERM)")
 usage_ok_count = sum(1 for ok in usage_rows if ok)
-out(f"usage_connectors={'PASS' if usage_ok_count == 16 else 'FAIL'} ({usage_ok_count}/16 typed sentinel outcomes; ok rows carry the registry sourceKind)")
+out(f"usage_connectors={'PASS' if usage_ok_count == 17 else 'FAIL'} ({usage_ok_count}/17 typed sentinel outcomes; ok rows carry the registry sourceKind)")
 if any(f.startswith("login") for f in failures):
     out("note=login rows that hit the outer bound ignored their request deadlineAtMs and kept running; the app is protected by its own client-side deadline watchdog (BridgeClient reaps the helper), and the bounded-cancel section proves SIGTERM reaps every flow")
 if failures:

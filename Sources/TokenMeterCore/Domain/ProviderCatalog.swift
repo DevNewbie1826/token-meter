@@ -348,7 +348,7 @@ public struct ProviderCatalog: Equatable, Sendable, Codable {
 
 public extension ProviderCatalog {
     /// Pinned OMP checkout the 16 OMP-derived capabilities were synchronized from.
-    static let ompPinnedSHA = "8500092296621a6826b7136e840f8a59ea338958"
+    static let ompPinnedSHA = "d720e81fb747132f0b6c6c0f44eafc887552ec7f"
 
     /// Display-name metadata deliberately kept outside the registry wire;
     /// presentation only, never capability data.

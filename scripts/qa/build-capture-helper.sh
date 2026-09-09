@@ -30,6 +30,9 @@ xcrun swiftc \
   "$ROOT/scripts/qa/NekosAXSignal.swift" \
   "$ROOT/scripts/qa/NekosQALifecycle.swift" \
   "$ROOT/scripts/qa/NekosAXScenario.swift" \
+  "$ROOT/scripts/qa/ProviderParityAXScenario.swift" \
+  -D TOKEN_METER_QA \
+  "$ROOT/Sources/TokenMeterApp/QACapture.swift" \
   -framework AppKit \
   -framework ApplicationServices \
   -framework CoreGraphics \

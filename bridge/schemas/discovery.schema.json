@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://token-meter.app/schemas/discovery/1.0.0/discovery.schema.json",
+  "title": "Pending OMP source discoveries",
+  "description": "Source-only review backlog, not shipped capabilities, registration or a model catalog. Versioned independently from registry and wire schemas.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "syncedFromSha", "pendingProviders"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "syncedFromSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "pendingProviders": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "adapterSourcePath", "reviewStatus"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "adapterSourcePath": { "type": "string", "pattern": "^packages/ai/src/.+\\.ts$" },
+          "reviewStatus": { "const": "pendingCapabilityReview" }
+        }
+      }
+    }
+  }
+}

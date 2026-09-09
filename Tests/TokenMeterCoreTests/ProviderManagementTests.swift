@@ -6,7 +6,7 @@ import XCTest
 @testable import TokenMeterCore
 
 final class ProviderManagementTests: XCTestCase {
-    private static let pinnedOMPSHA = "8500092296621a6826b7136e840f8a59ea338958"
+    private static let pinnedOMPSHA = "d720e81fb747132f0b6c6c0f44eafc887552ec7f"
 
     private static let lockedIDs = [
         "alibaba-token-plan",
@@ -29,6 +29,53 @@ final class ProviderManagementTests: XCTestCase {
     ]
 
     // MARK: - Registry 1.2.0 and locked provider set
+
+    func testAntigravityDeclaresFiveHourDailyAndWeeklyWindows() throws {
+        let provider = try XCTUnwrap(ProviderCatalog.locked.providers.first { $0.id == "google-antigravity" })
+        XCTAssertEqual(provider.declaredWindows, [.fiveHour, .daily, .weekly])
+        XCTAssertEqual(provider.registrySupportTier, .excluded)
+        XCTAssertEqual(provider.pollingPolicy, .notPolled)
+        XCTAssertEqual(provider.authMethods, [.browser])
+    }
+
+    func testLatestSourceMetadataPreservesIndependentMixedAmounts() throws {
+        XCTAssertEqual(ProviderCatalog.ompPinnedSHA, Self.pinnedOMPSHA)
+        for id in ["anthropic", "cursor", "google-antigravity", "synthetic", "zai"] {
+            let provider = try XCTUnwrap(ProviderCatalog.locked.providers.first { $0.id == id })
+            XCTAssertEqual(provider.declaredUnit, .unknown, id)
+            XCTAssertEqual(provider.pollingPolicy, .notPolled, id)
+        }
+        XCTAssertEqual(ProviderCatalog.locked.providers.first { $0.id == "anthropic" }?.declaredWindows,
+                       [.fiveHour, .sevenDay, .monthly])
+    }
+
+    func testPendingDiscoveryFieldsAreNotShippedCapabilities() throws {
+        var object = try jsonObject(from: Self.registryResourceData())
+        var providers = try XCTUnwrap(object["providers"] as? [[String: Any]])
+        providers[0]["pendingCapabilityReview"] = true
+        object["providers"] = providers
+        XCTAssertThrowsError(try ProviderCatalog(decoding: JSONSerialization.data(withJSONObject: object)))
+        XCTAssertFalse(ProviderCatalog.locked.providers.contains { ["cline-pass", "devin", "muse-code"].contains($0.id) })
+    }
+
+    func testGeneratedCatalogMatchesResourceAndDiscoveryCannotDecodeAsCatalog() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let generated = try Data(contentsOf: root.appendingPathComponent("bridge/generated/provider-capabilities.json"))
+        XCTAssertEqual(generated, try Self.registryResourceData())
+        XCTAssertEqual(try ProviderCatalog(decoding: generated), ProviderCatalog.locked)
+        let discovery = try Data(contentsOf: root.appendingPathComponent("bridge/generated/provider-discovery.json"))
+        XCTAssertThrowsError(try ProviderCatalog(decoding: discovery))
+        let object = try jsonObject(from: discovery)
+        XCTAssertEqual(Set(object.keys), ["schemaVersion", "syncedFromSha", "pendingProviders"])
+        XCTAssertEqual(object["syncedFromSha"] as? String, Self.pinnedOMPSHA)
+        let pending = try XCTUnwrap(object["pendingProviders"] as? [[String: Any]])
+        XCTAssertEqual(pending.compactMap { $0["id"] as? String }, ["cline-pass", "devin", "muse-code"])
+        for provider in pending {
+            XCTAssertEqual(Set(provider.keys), ["id", "adapterSourcePath", "reviewStatus"])
+            XCTAssertEqual(provider["reviewStatus"] as? String, "pendingCapabilityReview")
+        }
+    }
 
     func testLockedProviderIDsAreExactlyTheSeventeenLockedEntries() {
         let ids = ProviderCatalog.lockedProviderIds

@@ -13,6 +13,23 @@ const discovered = ompIds.map((id) => ({ id, adapterSourcePath: `src/providers/$
 const expectedIds = [...ompIds, "nekos" as const].sort();
 
 describe("app-owned provider union", () => {
+  test("Antigravity declares summary 5h windows alongside daily and weekly", () => {
+    const provider = listProviderCapabilities().find(provider => provider.id === "google-antigravity");
+    expect(provider?.declaredWindows).toEqual(["5h", "daily", "weekly"]);
+    expect(provider?.supportTier).toBe("excluded");
+    expect(provider?.pollingPolicy).toBe("notPolled");
+    expect(provider?.authMethods).toEqual(["browser"]);
+  });
+
+  test("declares mixed adapter amounts honestly without changing polling policy", () => {
+    const providers = new Map(listProviderCapabilities().map(provider => [provider.id, provider]));
+    for (const id of ["anthropic", "cursor", "google-antigravity", "synthetic", "zai"] as const) {
+      expect(providers.get(id)?.declaredUnit).toBe("unknown");
+      expect(providers.get(id)?.pollingPolicy).toBe("notPolled");
+    }
+    expect(providers.get("anthropic")?.declaredWindows).toEqual(["5h", "7d", "monthly"]);
+  });
+
   test("includes Nekos when discovery contains only the 16 OMP providers", () => {
     // Given: discovery has no app-owned provider.
     const input = { discovered, headSha: OMP_PINNED_SHA };

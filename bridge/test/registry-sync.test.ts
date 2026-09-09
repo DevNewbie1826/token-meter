@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION } from "../src/protocol";
@@ -16,6 +16,8 @@ import {
   OMP_PINNED_SHA,
   OmpSyncError,
   buildCapabilityManifest,
+  buildPendingDiscoveryReport,
+  syncOmpDiscovery,
   syncOmpRegistry,
 } from "../scripts/sync-omp-registry";
 import type { DiscoveredOmpProvider } from "../scripts/sync-omp-registry";
@@ -41,27 +43,6 @@ const LOCKED_16 = [
 ] as const;
 
 const LOCKED_17 = [...LOCKED_16, "nekos" as const].sort();
-
-const IDS_WITH_NEWCOMER = [
-  "alibaba-token-plan",
-  "anthropic",
-  "cursor",
-  "github-copilot",
-  "google-antigravity",
-  "google-gemini-cli",
-  "kimi-code",
-  "minimax-code",
-  "nekos",
-  "newcomer-ai",
-  "ollama",
-  "ollama-cloud",
-  "openai-codex",
-  "opencode-go",
-  "synthetic",
-  "umans",
-  "xai-oauth",
-  "zai",
-] as const;
 
 const ALLOWED_CAPABILITY_KEYS = [
   "authMethods",
@@ -91,7 +72,12 @@ function syncErrorFrom(action: () => unknown): OmpSyncError {
 
 const DISCOVERED_LOCKED: readonly DiscoveredOmpProvider[] = LOCKED_16.map((id) => ({
   id,
-  adapterSourcePath: `src/providers/${id}.ts`,
+  adapterSourcePath: `packages/ai/src/usage/${id}.ts`,
+}));
+
+const PENDING_IDS = ["cline-pass", "devin", "muse-code"] as const;
+const DISCOVERED_PENDING = PENDING_IDS.map(id => ({
+  id, adapterSourcePath: `packages/ai/src/usage/${id}.ts`,
 }));
 
 // Minimal JSON Schema (draft 2020-12 subset) checker: enough vocabulary for
@@ -182,6 +168,16 @@ function assertSchema(value: unknown, schema: JsonSchema, root: JsonSchema, path
   if (type === "string" && typeof value !== "string") {
     throw new Error(`${path}: expected string, got ${JSON.stringify(value)}`);
   }
+  if (typeof value === "string") {
+    const minLength = schema["minLength"];
+    const pattern = schema["pattern"];
+    if (typeof minLength === "number" && value.length < minLength) {
+      throw new Error(`${path}: string shorter than ${minLength}`);
+    }
+    if (typeof pattern === "string" && !new RegExp(pattern).test(value)) {
+      throw new Error(`${path}: string does not match ${pattern}`);
+    }
+  }
   if (typeof type === "string" && (type === "integer" || type === "number") && typeof value !== "number") {
     throw new Error(`${path}: expected number, got ${JSON.stringify(value)}`);
   }
@@ -189,7 +185,7 @@ function assertSchema(value: unknown, schema: JsonSchema, root: JsonSchema, path
 
 describe("OMP pinned source", () => {
   test("pins the research-locked OMP commit when sync runs", () => {
-    expect(OMP_PINNED_SHA).toBe("8500092296621a6826b7136e840f8a59ea338958");
+    expect(OMP_PINNED_SHA).toBe("d720e81fb747132f0b6c6c0f44eafc887552ec7f");
   });
 });
 
@@ -309,19 +305,14 @@ describe("buildCapabilityManifest", () => {
     expect(github.supportTier).toBe("supported");
   });
 
-  test("flags an unknown discovered provider as excluded and pending review when OMP adds one", () => {
+  test("never publishes an unknown discovered provider when OMP adds one", () => {
     const discovered = [...DISCOVERED_LOCKED, { id: "newcomer-ai", adapterSourcePath: "src/x.ts" }];
     const manifest = buildCapabilityManifest({ discovered, headSha: OMP_PINNED_SHA });
-    expect(manifest.providers.map((provider) => provider.id)).toEqual([...IDS_WITH_NEWCOMER]);
-    const newcomer = manifest.providers.find((provider) => provider.id === "newcomer-ai");
-    if (newcomer === undefined) {
-      throw new Error("newcomer-ai missing from manifest");
+    expect(manifest.providers.map((provider) => provider.id)).toEqual([...LOCKED_17]);
+    expect(manifest.providers).toEqual(listProviderCapabilities());
+    for (const provider of manifest.providers) {
+      expect(Object.keys(provider).sort()).toEqual(ALLOWED_CAPABILITY_KEYS);
     }
-    expect(newcomer.supportTier).toBe("excluded");
-    expect(newcomer.connectorTransport).toBe("external");
-    expect(newcomer.authMethods).toEqual([]);
-    expect(newcomer.credentialKinds).toEqual([]);
-    expect(newcomer.pendingCapabilityReview).toBe(true);
   });
 
   test("fails loudly when a locked provider is missing from the checkout", () => {
@@ -364,6 +355,91 @@ describe("generated manifests", () => {
       }
     }
     expectNoModelFields(manifest);
+  });
+});
+
+describe("separate pending discovery", () => {
+  const schema = JSON.parse(readFileSync(new URL("../schemas/discovery.schema.json", import.meta.url), "utf8")) as JsonSchema;
+  const discovered = [...DISCOVERED_LOCKED, ...DISCOVERED_PENDING];
+  const input = { discovered, headSha: OMP_PINNED_SHA };
+
+  test("keeps three new IDs and source paths pending without capability claims", () => {
+    const report = buildPendingDiscoveryReport(input);
+    expect(report).toEqual({
+      schemaVersion: "1.0.0", syncedFromSha: OMP_PINNED_SHA,
+      pendingProviders: DISCOVERED_PENDING.map(provider => ({ ...provider, reviewStatus: "pendingCapabilityReview" })),
+    });
+    expect(buildCapabilityManifest(input).providers.map(provider => provider.id)).toEqual(LOCKED_17);
+    expectNoModelFields(report);
+    assertSchema(report, schema, schema, "$");
+    expect(readFileSync(new URL("../generated/provider-discovery.json", import.meta.url), "utf8"))
+      .toBe(`${JSON.stringify(report, null, "\t")}\n`);
+  });
+
+  test("keeps arbitrary future discoveries separate, sorted and deterministic", () => {
+    const future = { id: "future-ai", adapterSourcePath: "packages/ai/src/usage/future-ai.ts" };
+    const withFuture = [...discovered, future, ...DISCOVERED_PENDING,
+      { id: "nekos", adapterSourcePath: "packages/ai/src/usage/nekos.ts" }];
+    const report = buildPendingDiscoveryReport({ ...input, discovered: withFuture });
+    expect(report.pendingProviders.map(provider => provider.id)).toEqual(["cline-pass", "devin", "future-ai", "muse-code"]);
+    expect(JSON.stringify(report)).toBe(JSON.stringify(buildPendingDiscoveryReport({ ...input, discovered: withFuture.reverse() })));
+    expect(buildCapabilityManifest({ ...input, discovered: withFuture }).providers).toEqual(listProviderCapabilities());
+    assertSchema(report, schema, schema, "$");
+  });
+
+  test("requires all reviewed OMP providers even in discovery mode", () => {
+    for (const missingId of LOCKED_16) {
+      expect(syncErrorFrom(() => buildPendingDiscoveryReport({
+        ...input, discovered: discovered.filter(provider => provider.id !== missingId),
+      })).kind).toBe("lockedProviderMissing");
+    }
+    expect(buildPendingDiscoveryReport({ ...input, discovered: DISCOVERED_LOCKED }).pendingProviders).toEqual([]);
+  });
+
+  test("rejects capability claims, model fields, unknown fields, bad provenance and review status", () => {
+    const report = buildPendingDiscoveryReport(input);
+    const first = report.pendingProviders[0];
+    if (first === undefined) throw new Error("pending fixture missing");
+    for (const invalid of [
+      { ...report, providers: [] },
+      { ...report, syncedFromSha: "not-a-sha" },
+      { ...report, schemaVersion: REGISTRY_VERSION },
+      { ...report, pendingProviders: [{ ...first, supportTier: "excluded" }] },
+      { ...report, pendingProviders: [{ ...first, authMethods: [] }] },
+      { ...report, pendingProviders: [{ ...first, modelCatalog: [] }] },
+      { ...report, pendingProviders: [{ ...first, id: "" }] },
+      { ...report, pendingProviders: [{ ...first, reviewStatus: "supported" }] },
+      { ...report, pendingProviders: [{ ...first, adapterSourcePath: "/tmp/provider.ts" }] },
+      { ...report, pendingProviders: [{ id: first.id, reviewStatus: first.reviewStatus }] },
+      { ...report, pendingProviders: [first, first] },
+    ]) {
+      expect(() => assertSchema(invalid, schema, schema, "$")).toThrow();
+    }
+  });
+
+  test("scans source-only adapters through both sync entry points without importing them", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "token-meter-discovery-"));
+    try {
+      mkdirSync(join(scratch, "packages/ai/src/usage"), { recursive: true });
+      const entries = [...discovered, { id: "future-ai", adapterSourcePath: "packages/ai/src/usage/future-ai.ts" }];
+      const imports = entries.map((entry, i) => `import { provider${i} } from "./usage/${entry.id}";`).join("\n");
+      writeFileSync(join(scratch, "packages/ai/src/auth-storage.ts"),
+        `${imports}\nthrow new Error("upstream must never execute");\nconst DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [${entries.map((_, i) => `provider${i}`).join(",")}];`);
+      entries.forEach((entry, i) => writeFileSync(join(scratch, entry.adapterSourcePath),
+        `throw new Error("adapter must never execute");\nconst ID = ${JSON.stringify(entry.id)};\nexport const provider${i}: UsageProvider = { nested: { id: "wrong" }, id: ID };`));
+      const options = { checkoutPath: scratch, resolveHeadSha: () => OMP_PINNED_SHA, resolveCheckoutStatus: () => "" };
+      expect(syncOmpRegistry(options).providers).toEqual(listProviderCapabilities());
+      const report = syncOmpDiscovery(options);
+      expect(report.pendingProviders.map(provider => provider.id)).toEqual(["cline-pass", "devin", "future-ai", "muse-code"]);
+      expect(report.pendingProviders).toContainEqual({
+        id: "future-ai", adapterSourcePath: "packages/ai/src/usage/future-ai.ts", reviewStatus: "pendingCapabilityReview",
+      });
+      expect(syncOmpDiscovery(options)).toEqual(report);
+      assertSchema(report, schema, schema, "$");
+      expect(syncErrorFrom(() => syncOmpDiscovery({ ...options, resolveCheckoutStatus: () => "?? new.ts" })).kind).toBe("dirtyCheckout");
+    } finally {
+      rmSync(scratch, { recursive: true });
+    }
   });
 });
 
@@ -414,9 +490,30 @@ describe("registry schema agreement", () => {
       "$",
     );
   });
+
+  test("rejects pending-review fields and non-17 manifest counts", () => {
+    const schema = schemaDef(registrySchema, "#/$defs/capabilityManifest");
+    const providers = listProviderCapabilities();
+    expect(() => assertSchema({ ...generatedManifest, providers: providers.map(provider => ({
+      ...provider, pendingCapabilityReview: true,
+    })) }, schema, registrySchema, "$" )).toThrow();
+    for (const entries of [providers.slice(1), [...providers, providers[0]]]) {
+      expect(() => assertSchema({ ...generatedManifest, providers: entries }, schema, registrySchema, "$" )).toThrow();
+    }
+  });
 });
 
 describe("syncOmpRegistry checkout gate", () => {
+  test("rejects a dirty checkout even when HEAD matches the pin", () => {
+    const options = {
+      checkoutPath: import.meta.dir,
+      resolveHeadSha: () => OMP_PINNED_SHA,
+      resolveCheckoutStatus: () => " M packages/ai/src/auth-storage.ts\n",
+      discoverProviders: () => DISCOVERED_LOCKED,
+    };
+    expect(syncErrorFrom(() => syncOmpRegistry(options)).kind).toBe("dirtyCheckout");
+  });
+
   test("rejects a relative checkout path when sync is configured", () => {
     expect(syncErrorFrom(() => syncOmpRegistry({ checkoutPath: "oh-my-pi" })).kind).toBe(
       "invalidCheckoutPath",
